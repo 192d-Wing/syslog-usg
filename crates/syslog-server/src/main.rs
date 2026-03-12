@@ -216,6 +216,10 @@ fn start_listeners(
 
                 info!(addr = %addr, "UDP listener configured");
             }
+            ListenerProtocol::Dtls => {
+                warn!(addr = %addr, "DTLS listener not yet implemented (RFC 6012), skipping");
+                continue;
+            }
             ListenerProtocol::Tcp | ListenerProtocol::Tls => {
                 let tls_acceptor = if listener_cfg.protocol == ListenerProtocol::Tls {
                     let tls_cfg = match &listener_cfg.tls {
@@ -317,6 +321,7 @@ fn build_outputs(config: &ServerConfig) -> Vec<NetworkOutput> {
                     OutputProtocol::Udp => "udp",
                     OutputProtocol::Tcp => "tcp",
                     OutputProtocol::Tls => "tls",
+                    OutputProtocol::Dtls => "dtls",
                 };
                 let output = NetworkOutput::tcp(&output_cfg.name, addr);
                 info!(
@@ -364,6 +369,13 @@ fn build_outputs(config: &ServerConfig) -> Vec<NetworkOutput> {
                     "TLS output configured"
                 );
                 outputs.push(output);
+            }
+            OutputProtocol::Dtls => {
+                warn!(
+                    name = %output_cfg.name,
+                    "DTLS output not yet implemented (RFC 6012), skipping"
+                );
+                continue;
             }
         }
     }

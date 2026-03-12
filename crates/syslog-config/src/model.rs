@@ -71,6 +71,7 @@ pub enum ListenerProtocol {
     Udp,
     Tcp,
     Tls,
+    Dtls,
 }
 
 /// Configuration for a single listener (inbound socket).
@@ -114,6 +115,7 @@ pub enum OutputProtocol {
     Udp,
     Tcp,
     Tls,
+    Dtls,
 }
 
 /// A single relay-forwarding destination.

@@ -123,6 +123,11 @@ fn validate(config: &ServerConfig) -> Result<(), ConfigError> {
                 "listeners[{i}]: TLS protocol requires a [tls] section"
             )));
         }
+        if listener.protocol == ListenerProtocol::Dtls && listener.tls.is_none() {
+            return Err(ConfigError::Validation(format!(
+                "listeners[{i}]: DTLS protocol requires a [tls] section"
+            )));
+        }
     }
 
     // Validate outputs.
@@ -136,6 +141,12 @@ fn validate(config: &ServerConfig) -> Result<(), ConfigError> {
         if output.protocol == OutputProtocol::Tls && output.tls.is_none() {
             return Err(ConfigError::Validation(format!(
                 "outputs[{i}] ('{}'): TLS protocol requires a [tls] section",
+                output.name
+            )));
+        }
+        if output.protocol == OutputProtocol::Dtls && output.tls.is_none() {
+            return Err(ConfigError::Validation(format!(
+                "outputs[{i}] ('{}'): DTLS protocol requires a [tls] section",
                 output.name
             )));
         }
