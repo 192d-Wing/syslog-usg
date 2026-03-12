@@ -1,0 +1,28 @@
+[package]
+name = "syslog-integration-tests"
+description = "End-to-end integration tests for syslog-usg"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+expect_used = "allow"
+unwrap_used = "allow"
+indexing_slicing = "allow"
+panic = "allow"
+
+[[test]]
+name = "end_to_end"
+path = "end_to_end.rs"
+
+[dependencies]
+syslog-proto = { workspace = true }
+syslog-parse = { workspace = true }
+syslog-transport = { workspace = true }
+syslog-relay = { workspace = true }
+tokio = { workspace = true }

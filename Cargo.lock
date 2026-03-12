@@ -1249,6 +1249,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "syslog-integration-tests"
+version = "0.1.0"
+dependencies = [
+ "syslog-parse",
+ "syslog-proto",
+ "syslog-relay",
+ "syslog-transport",
+ "tokio",
+]
+
+[[package]]
 name = "syslog-mgmt"
 version = "0.1.0"
 
