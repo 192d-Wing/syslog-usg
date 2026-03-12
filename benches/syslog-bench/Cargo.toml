@@ -1,0 +1,34 @@
+[package]
+name = "syslog-bench"
+description = "Benchmarks for syslog-usg"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+expect_used = "allow"
+unwrap_used = "allow"
+indexing_slicing = "allow"
+panic = "allow"
+
+[[bench]]
+name = "parse"
+harness = false
+
+[[bench]]
+name = "pipeline"
+harness = false
+
+[dependencies]
+syslog-proto = { workspace = true }
+syslog-parse = { workspace = true }
+syslog-relay = { workspace = true }
+bytes = { workspace = true }
+compact_str = { workspace = true }
+criterion = { workspace = true }
+tokio = { workspace = true }
