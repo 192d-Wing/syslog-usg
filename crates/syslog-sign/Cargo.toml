@@ -1,6 +1,6 @@
 [package]
 name = "syslog-sign"
-description = "Signed syslog messages (RFC 5848) — future"
+description = "Signed syslog messages (RFC 5848)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,3 +10,15 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+syslog-proto = { workspace = true }
+syslog-parse = { workspace = true }
+compact_str = { workspace = true }
+smallvec = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+ring = { workspace = true }
+base64 = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

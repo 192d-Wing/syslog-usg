@@ -1579,6 +1579,18 @@ dependencies = [
 [[package]]
 name = "syslog-sign"
 version = "0.1.0"
+dependencies = [
+ "base64",
+ "bytes",
+ "compact_str",
+ "ring",
+ "serde_json",
+ "smallvec",
+ "syslog-parse",
+ "syslog-proto",
+ "thiserror 2.0.18",
+ "tracing",
+]
 
 [[package]]
 name = "syslog-transport"

@@ -78,6 +78,10 @@ tower = "0.5"
 # Benchmarks
 criterion = { version = "0.5", features = ["html_reports"] }
 
+# Crypto (signing)
+ring = { version = "0.17", default-features = false }
+base64 = "0.22"
+
 # Misc
 compact_str = { version = "0.8", features = ["serde"] }
 tokio-graceful-shutdown = "0.15"
