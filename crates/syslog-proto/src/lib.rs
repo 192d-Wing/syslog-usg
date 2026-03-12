@@ -1,5 +1,6 @@
 #![doc = "Core syslog protocol types implementing the RFC 5424 message model.\n\nThis crate provides the canonical in-memory representation of syslog messages,\nincluding facility, severity, priority, structured data, and all header fields\nas defined by RFC 5424 (The Syslog Protocol) and RFC 5427 (Textual Conventions\nfor Syslog Management)."]
 
+pub mod alarm;
 mod app_name;
 mod facility;
 mod hostname;
@@ -12,6 +13,7 @@ mod severity;
 mod structured_data;
 mod timestamp;
 
+pub use alarm::{Alarm, AlarmError, ItuEventType, PerceivedSeverity, TrendIndication};
 pub use app_name::AppName;
 pub use facility::{Facility, InvalidFacility, UnknownFacilityName};
 pub use hostname::Hostname;
