@@ -13,5 +13,5 @@ pub mod udp;
 
 pub use error::TransportError;
 pub use framing::OctetCountingCodec;
-pub use tcp::{TcpListenerConfig, TcpMessage};
-pub use udp::{UdpDatagram, UdpListenerConfig};
+pub use tcp::{TcpListenerConfig, TcpMessage, run_tcp_listener};
+pub use udp::{UdpDatagram, UdpListenerConfig, run_udp_listener};

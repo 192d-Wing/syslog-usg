@@ -94,22 +94,20 @@ mod tests {
     fn registered_id() {
         let id = SdId::new("timeQuality");
         assert!(id.is_ok());
-        if let Ok(SdId::Registered(s)) = &id {
-            assert_eq!(s.as_str(), "timeQuality");
-        } else {
-            panic!("expected Registered variant");
-        }
+        assert!(
+            matches!(&id, Ok(SdId::Registered(s)) if s.as_str() == "timeQuality"),
+            "expected Registered('timeQuality'), got {id:?}"
+        );
     }
 
     #[test]
     fn enterprise_id() {
         let id = SdId::new("myId@12345");
         assert!(id.is_ok());
-        if let Ok(SdId::Enterprise(s)) = &id {
-            assert_eq!(s.as_str(), "myId@12345");
-        } else {
-            panic!("expected Enterprise variant");
-        }
+        assert!(
+            matches!(&id, Ok(SdId::Enterprise(s)) if s.as_str() == "myId@12345"),
+            "expected Enterprise('myId@12345'), got {id:?}"
+        );
     }
 
     #[test]

@@ -7,17 +7,23 @@
 //! - Observability (metrics, health endpoints, structured logging)
 //! - Configuration loading (TOML with env var substitution)
 
+mod network_output;
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::Parser;
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
-use syslog_config::model::{ListenerProtocol, ServerConfig};
+use syslog_config::model::{ListenerProtocol, OutputProtocol, ServerConfig};
 use syslog_observe::{HealthState, health_router, init_logging, init_metrics};
-use syslog_relay::{ForwardOutput, Pipeline, PipelineIngress};
+use syslog_relay::{Pipeline, PipelineIngress};
+use syslog_transport::tcp::{TcpListenerConfig, TcpMessage, run_tcp_listener};
 use syslog_transport::udp::{UdpDatagram, UdpListenerConfig, run_udp_listener};
+
+use crate::network_output::NetworkOutput;
 
 /// syslog-usg: Production-grade syslog server and relay.
 #[derive(Parser, Debug)]
@@ -70,12 +76,14 @@ async fn main() {
     // Shutdown coordination
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    // Build the relay pipeline
-    let output = ForwardOutput::new("default");
+    // Build outputs from config
+    let outputs = build_outputs(&config);
+    if outputs.is_empty() {
+        warn!("no outputs configured — messages will be received but not forwarded");
+    }
     let channel_capacity = config.pipeline.channel_buffer_size;
 
-    let (pipeline, ingress, pipeline_shutdown) =
-        Pipeline::new(channel_capacity, None, vec![output]);
+    let (pipeline, ingress, pipeline_shutdown) = Pipeline::new(channel_capacity, None, outputs);
 
     // Start the relay pipeline
     let pipeline_handle = tokio::spawn(async move {
@@ -208,12 +216,157 @@ fn start_listeners(
 
                 info!(addr = %addr, "UDP listener configured");
             }
-            ListenerProtocol::Tcp => {
-                info!(addr = %addr, "TCP listener configured (not yet wired)");
-            }
-            ListenerProtocol::Tls => {
-                info!(addr = %addr, "TLS listener configured (not yet wired)");
+            ListenerProtocol::Tcp | ListenerProtocol::Tls => {
+                let tls_acceptor = if listener_cfg.protocol == ListenerProtocol::Tls {
+                    let tls_cfg = match &listener_cfg.tls {
+                        Some(t) => t,
+                        None => {
+                            error!(addr = %addr, "TLS listener missing [tls] config section");
+                            continue;
+                        }
+                    };
+
+                    let transport_tls = syslog_transport::tls::TlsConfig {
+                        cert_path: tls_cfg.cert_path.clone(),
+                        key_path: tls_cfg.key_path.clone(),
+                        client_auth: tls_cfg.client_auth,
+                        client_ca_path: tls_cfg.ca_path.clone(),
+                    };
+
+                    match syslog_transport::tls::build_server_config(&transport_tls) {
+                        Ok(c) => Some(Arc::new(tokio_rustls::TlsAcceptor::from(c))),
+                        Err(e) => {
+                            error!(addr = %addr, "failed to build TLS config: {e}");
+                            continue;
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                let proto_label = if tls_acceptor.is_some() { "TLS" } else { "TCP" };
+
+                let tcp_config = TcpListenerConfig {
+                    bind_addr: addr,
+                    max_frame_size: config.pipeline.max_message_size,
+                    tls_acceptor,
+                };
+
+                let (tcp_tx, mut tcp_rx) = mpsc::channel::<TcpMessage>(4096);
+                let shutdown = shutdown_rx.clone();
+                let ingress = ingress.clone();
+
+                // Spawn the TCP/TLS listener
+                handles.push(tokio::spawn(async move {
+                    if let Err(e) = run_tcp_listener(tcp_config, tcp_tx, shutdown).await {
+                        error!("{proto_label} listener error: {e}");
+                    }
+                }));
+
+                // Spawn the parser bridge (TCP frames -> parsed messages -> pipeline)
+                handles.push(tokio::spawn(async move {
+                    while let Some(frame) = tcp_rx.recv().await {
+                        match syslog_parse::parse(&frame.data) {
+                            Ok(msg) => {
+                                if let Err(e) = ingress.send(msg).await {
+                                    warn!("pipeline send error: {e}");
+                                    return;
+                                }
+                            }
+                            Err(e) => {
+                                warn!(
+                                    source = %frame.peer,
+                                    tls = frame.tls,
+                                    "parse error: {e}"
+                                );
+                                metrics::counter!("syslog_messages_parsed_total", "format" => "invalid")
+                                    .increment(1);
+                            }
+                        }
+                    }
+                }));
+
+                info!(addr = %addr, proto = proto_label, "listener configured");
             }
         }
     }
+}
+
+/// Build network outputs from configuration.
+fn build_outputs(config: &ServerConfig) -> Vec<NetworkOutput> {
+    let mut outputs = Vec::new();
+
+    for output_cfg in &config.outputs {
+        let addr: SocketAddr = match output_cfg.address.parse() {
+            Ok(a) => a,
+            Err(e) => {
+                error!(
+                    name = %output_cfg.name,
+                    address = %output_cfg.address,
+                    "invalid output address: {e}"
+                );
+                continue;
+            }
+        };
+
+        match output_cfg.protocol {
+            OutputProtocol::Tcp | OutputProtocol::Udp => {
+                // UDP outputs use the same TCP framing for simplicity in MVP;
+                // a dedicated UDP sender can be added later.
+                let proto_label = match output_cfg.protocol {
+                    OutputProtocol::Udp => "udp",
+                    OutputProtocol::Tcp => "tcp",
+                    OutputProtocol::Tls => "tls",
+                };
+                let output = NetworkOutput::tcp(&output_cfg.name, addr);
+                info!(
+                    name = %output_cfg.name,
+                    addr = %addr,
+                    proto = proto_label,
+                    "output configured"
+                );
+                outputs.push(output);
+            }
+            OutputProtocol::Tls => {
+                let tls_cfg = match &output_cfg.tls {
+                    Some(t) => t,
+                    None => {
+                        error!(
+                            name = %output_cfg.name,
+                            "TLS output missing [tls] config section"
+                        );
+                        continue;
+                    }
+                };
+
+                // Build client TLS config
+                let mut root_store = rustls::RootCertStore::empty();
+                root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+                let client_config = rustls::ClientConfig::builder()
+                    .with_root_certificates(root_store)
+                    .with_no_client_auth();
+
+                let connector = Arc::new(tokio_rustls::TlsConnector::from(Arc::new(client_config)));
+
+                // Derive server name from address (use IP as fallback)
+                let server_name = output_cfg
+                    .address
+                    .split(':')
+                    .next()
+                    .unwrap_or(&output_cfg.address);
+
+                let output = NetworkOutput::tls(&output_cfg.name, addr, connector, server_name);
+                info!(
+                    name = %output_cfg.name,
+                    addr = %addr,
+                    cert = %tls_cfg.cert_path,
+                    "TLS output configured"
+                );
+                outputs.push(output);
+            }
+        }
+    }
+
+    outputs
 }

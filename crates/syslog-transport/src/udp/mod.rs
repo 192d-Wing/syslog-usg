@@ -142,7 +142,7 @@ mod tests {
         let socket = UdpSocket::bind(config.bind_addr).await;
         assert!(socket.is_ok());
         let socket = socket.unwrap_or_else(|_| unreachable!());
-        let bound_addr = socket.local_addr().unwrap_or_else(|_| config.bind_addr);
+        let bound_addr = socket.local_addr().unwrap_or(config.bind_addr);
         drop(socket);
 
         let listener_config = UdpListenerConfig {

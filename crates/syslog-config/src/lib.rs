@@ -220,30 +220,21 @@ mod tests {
     #[test]
     fn test_substitute_no_vars() {
         let input = "host = \"localhost\"";
-        let out = match substitute_env_vars(input) {
-            Ok(v) => v,
-            Err(_) => String::new(),
-        };
+        let out = substitute_env_vars(input).unwrap_or_default();
         assert_eq!(out, input);
     }
 
     #[test]
     fn test_substitute_bare_dollar() {
         let input = "price = $5";
-        let out = match substitute_env_vars(input) {
-            Ok(v) => v,
-            Err(_) => String::new(),
-        };
+        let out = substitute_env_vars(input).unwrap_or_default();
         assert_eq!(out, "price = $5");
     }
 
     #[test]
     fn test_substitute_unterminated_brace() {
         let input = "val = ${OPEN";
-        let out = match substitute_env_vars(input) {
-            Ok(v) => v,
-            Err(_) => String::new(),
-        };
+        let out = substitute_env_vars(input).unwrap_or_default();
         assert_eq!(out, "val = ${OPEN");
     }
 
@@ -323,7 +314,7 @@ bind_address = "127.0.0.1:9091"
         assert_eq!(cfg.server.drain_timeout_seconds, 10);
         assert_eq!(cfg.listeners.len(), 2);
 
-        let udp = match cfg.listeners.get(0) {
+        let udp = match cfg.listeners.first() {
             Some(v) => v,
             None => return,
         };
@@ -344,7 +335,7 @@ bind_address = "127.0.0.1:9091"
         }
 
         assert_eq!(cfg.outputs.len(), 2);
-        let out0 = match cfg.outputs.get(0) {
+        let out0 = match cfg.outputs.first() {
             Some(v) => v,
             None => return,
         };
