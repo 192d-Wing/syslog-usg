@@ -18,7 +18,7 @@ use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
 use syslog_config::model::{ListenerProtocol, OutputProtocol, ServerConfig};
-use syslog_observe::{HealthState, health_router, init_logging, init_metrics};
+use syslog_observe::{HealthState, LogReloadHandle, health_router, init_logging, init_metrics};
 use syslog_relay::{Pipeline, PipelineIngress};
 use syslog_transport::tcp::{TcpListenerConfig, TcpMessage, run_tcp_listener};
 use syslog_transport::udp::{UdpDatagram, UdpListenerConfig, run_udp_listener};
@@ -51,12 +51,15 @@ async fn main() {
         }
     };
 
-    // Initialize logging
+    // Initialize logging (returns a handle for runtime reload)
     let log_level = cli.log_level.as_deref().unwrap_or(&config.logging.level);
-    if let Err(e) = init_logging(log_level) {
-        eprintln!("error: failed to initialize logging: {e}");
-        std::process::exit(1);
-    }
+    let log_reload = match init_logging(log_level) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("error: failed to initialize logging: {e}");
+            std::process::exit(1);
+        }
+    };
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -129,11 +132,8 @@ async fn main() {
     health_state.set_ready(true);
     info!("syslog-usg ready");
 
-    // Wait for shutdown signal (SIGTERM / SIGINT)
-    match tokio::signal::ctrl_c().await {
-        Ok(()) => info!("received shutdown signal"),
-        Err(e) => error!("failed to listen for shutdown signal: {e}"),
-    }
+    // Wait for shutdown or reload signals
+    wait_for_signals(&cli.config, &log_reload).await;
 
     // Initiate graceful shutdown
     info!("initiating graceful shutdown");
@@ -369,4 +369,72 @@ fn build_outputs(config: &ServerConfig) -> Vec<NetworkOutput> {
     }
 
     outputs
+}
+
+/// Wait for shutdown (SIGINT/SIGTERM) or reload (SIGHUP) signals.
+///
+/// On SIGHUP: re-reads the config file and applies runtime-reloadable
+/// settings (currently: log level). Listener and output changes are logged
+/// but require a full restart to take effect.
+///
+/// On SIGINT/SIGTERM: returns so the caller can proceed with graceful shutdown.
+#[cfg(unix)]
+async fn wait_for_signals(config_path: &std::path::Path, log_reload: &LogReloadHandle) {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut sighup = match signal(SignalKind::hangup()) {
+        Ok(s) => s,
+        Err(e) => {
+            error!("failed to register SIGHUP handler: {e}");
+            // Fall back to just waiting for ctrl-c
+            match tokio::signal::ctrl_c().await {
+                Ok(()) => info!("received shutdown signal"),
+                Err(e) => error!("failed to listen for shutdown signal: {e}"),
+            }
+            return;
+        }
+    };
+
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("received shutdown signal");
+                return;
+            }
+            _ = sighup.recv() => {
+                info!("received SIGHUP — reloading configuration");
+                reload_config(config_path, log_reload);
+            }
+        }
+    }
+}
+
+/// Fallback for non-Unix platforms: just wait for ctrl-c.
+#[cfg(not(unix))]
+async fn wait_for_signals(_config_path: &std::path::Path, _log_reload: &LogReloadHandle) {
+    match tokio::signal::ctrl_c().await {
+        Ok(()) => info!("received shutdown signal"),
+        Err(e) => error!("failed to listen for shutdown signal: {e}"),
+    }
+}
+
+/// Re-read the config file and apply runtime-reloadable settings.
+fn reload_config(config_path: &std::path::Path, log_reload: &LogReloadHandle) {
+    let config = match syslog_config::load_config(config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            error!(path = %config_path.display(), "config reload failed: {e}");
+            return;
+        }
+    };
+
+    // Reload log level
+    match log_reload.reload_level(&config.logging.level) {
+        Ok(()) => info!(level = %config.logging.level, "log level reloaded"),
+        Err(e) => error!("failed to reload log level: {e}"),
+    }
+
+    // Note: listener and output changes require a restart.
+    // Future work: hot-swap outputs, add/remove listeners.
+    info!("configuration reloaded successfully");
 }

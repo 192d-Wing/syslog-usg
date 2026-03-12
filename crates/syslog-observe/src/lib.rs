@@ -9,5 +9,5 @@ pub mod metrics;
 
 // Re-export the primary entry points for convenience.
 pub use health::{HealthState, health_router};
-pub use logging::init_logging;
+pub use logging::{LogReloadHandle, init_logging};
 pub use metrics::init_metrics;
