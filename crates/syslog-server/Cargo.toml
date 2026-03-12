@@ -1,0 +1,28 @@
+[package]
+name = "syslog-server"
+description = "syslog-usg binary entrypoint"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "syslog-usg"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+syslog-proto = { workspace = true }
+syslog-parse = { workspace = true }
+syslog-transport = { workspace = true }
+syslog-relay = { workspace = true }
+syslog-config = { workspace = true }
+syslog-observe = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+axum = { workspace = true }
+metrics = { workspace = true }

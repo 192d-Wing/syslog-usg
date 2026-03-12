@@ -1,0 +1,87 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/syslog-proto",
+    "crates/syslog-parse",
+    "crates/syslog-transport",
+    "crates/syslog-relay",
+    "crates/syslog-config",
+    "crates/syslog-observe",
+    "crates/syslog-server",
+    "crates/syslog-sign",
+    "crates/syslog-mgmt",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/syslog-usg/syslog-usg"
+
+[workspace.dependencies]
+# Internal crates
+syslog-proto = { path = "crates/syslog-proto" }
+syslog-parse = { path = "crates/syslog-parse" }
+syslog-transport = { path = "crates/syslog-transport" }
+syslog-relay = { path = "crates/syslog-relay" }
+syslog-config = { path = "crates/syslog-config" }
+syslog-observe = { path = "crates/syslog-observe" }
+syslog-sign = { path = "crates/syslog-sign" }
+syslog-mgmt = { path = "crates/syslog-mgmt" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+tokio-stream = "0.1"
+
+# TLS
+tokio-rustls = "0.26"
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
+rustls-pemfile = "2"
+webpki-roots = "0.26"
+
+# Buffers
+bytes = "1"
+smallvec = { version = "1", features = ["union", "serde"] }
+
+# Serialization / Config
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Logging / Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# Metrics
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+
+# Time
+time = { version = "0.3", features = ["serde", "parsing", "formatting"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# HTTP admin server
+axum = "0.8"
+hyper = "1"
+tower = "0.5"
+
+# Misc
+compact_str = { version = "0.8", features = ["serde"] }
+tokio-graceful-shutdown = "0.15"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+panic = "deny"

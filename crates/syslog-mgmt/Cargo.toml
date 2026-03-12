@@ -1,0 +1,12 @@
+[package]
+name = "syslog-mgmt"
+description = "Syslog management model (RFC 5427/9742) — future"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

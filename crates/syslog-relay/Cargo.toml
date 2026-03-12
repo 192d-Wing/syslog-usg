@@ -1,0 +1,20 @@
+[package]
+name = "syslog-relay"
+description = "Syslog relay pipeline (filter, route, queue, fan-out)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+syslog-proto = { workspace = true }
+bytes = { workspace = true }
+compact_str = { workspace = true }
+smallvec = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+metrics = { workspace = true }

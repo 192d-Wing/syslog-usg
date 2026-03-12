@@ -1,0 +1,18 @@
+[package]
+name = "syslog-parse"
+description = "Syslog message parser and serializer (RFC 5424, RFC 3164)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+syslog-proto = { workspace = true }
+bytes = { workspace = true }
+compact_str = { workspace = true }
+smallvec = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
