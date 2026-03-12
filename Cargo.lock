@@ -1499,6 +1499,16 @@ dependencies = [
 [[package]]
 name = "syslog-mgmt"
 version = "0.1.0"
+dependencies = [
+ "bitflags",
+ "bytes",
+ "compact_str",
+ "regex",
+ "serde_json",
+ "syslog-proto",
+ "thiserror 2.0.18",
+ "time",
+]
 
 [[package]]
 name = "syslog-observe"

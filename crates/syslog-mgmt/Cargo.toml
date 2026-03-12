@@ -1,6 +1,6 @@
 [package]
 name = "syslog-mgmt"
-description = "Syslog management model (RFC 5427/9742) — future"
+description = "Syslog management model (RFC 5427/9742)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,3 +10,13 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+syslog-proto = { workspace = true }
+thiserror = { workspace = true }
+compact_str = { workspace = true }
+regex = { workspace = true }
+bitflags = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+bytes = { workspace = true }
+time = { workspace = true }
