@@ -106,7 +106,7 @@ async fn main() {
     // Build routing table from management actions
     let routing_table = build_routing_table(&config, outputs.len());
 
-    let (pipeline, ingress, pipeline_shutdown) = Pipeline::with_management(
+    let (mut pipeline, ingress, pipeline_shutdown) = Pipeline::with_management(
         channel_capacity,
         filters,
         outputs,
@@ -115,6 +115,7 @@ async fn main() {
         routing_table,
         Some(shared_state.clone()),
     );
+    pipeline.set_signing_fail_open(config.pipeline.signing_fail_open);
 
     // Start the relay pipeline
     let pipeline_handle = tokio::spawn(async move {

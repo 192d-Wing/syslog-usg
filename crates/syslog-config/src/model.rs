@@ -165,6 +165,12 @@ pub struct PipelineConfig {
     /// Optional alarm filter configuration (RFC 5674).
     #[serde(default)]
     pub alarm_filter: Option<AlarmFilterConfig>,
+
+    /// When true, signing failures forward the original unsigned message
+    /// (fail-open). When false, messages are dropped on signing failure
+    /// (fail-closed). Defaults to true for backward compatibility.
+    #[serde(default = "default_signing_fail_open")]
+    pub signing_fail_open: bool,
 }
 
 /// RFC 5674 alarm-aware filter configuration.
@@ -198,8 +204,13 @@ impl Default for PipelineConfig {
             channel_buffer_size: default_channel_buffer_size(),
             max_message_size: default_max_message_size(),
             alarm_filter: None,
+            signing_fail_open: default_signing_fail_open(),
         }
     }
+}
+
+fn default_signing_fail_open() -> bool {
+    true
 }
 
 fn default_channel_buffer_size() -> usize {

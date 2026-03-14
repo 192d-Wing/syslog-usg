@@ -36,6 +36,9 @@ pub struct Pipeline<O: Output> {
     routing_table: Option<RoutingTable>,
     /// Optional shared management state for atomic counters.
     shared_state: Option<SharedSyslogState>,
+    /// When true, signing failures forward the original unsigned message.
+    /// When false, messages are dropped on signing failure.
+    signing_fail_open: bool,
 }
 
 impl<O: Output> std::fmt::Debug for Pipeline<O> {
@@ -150,12 +153,21 @@ impl<O: Output> Pipeline<O> {
             verification,
             routing_table,
             shared_state,
+            signing_fail_open: true,
         };
 
         let ingress = PipelineIngress { tx };
         let shutdown_handle = ShutdownHandle { tx: shutdown_tx };
 
         (pipeline, ingress, shutdown_handle)
+    }
+
+    /// Set the signing failure policy.
+    ///
+    /// When `fail_open` is true (default), signing failures forward the
+    /// original unsigned message. When false, messages are dropped.
+    pub fn set_signing_fail_open(&mut self, fail_open: bool) {
+        self.signing_fail_open = fail_open;
     }
 
     /// Send a message to all outputs (fan-out mode).
@@ -300,8 +312,18 @@ impl<O: Output> Pipeline<O> {
                                 match signing.process_message(&message) {
                                     Ok(msgs) => msgs,
                                     Err(e) => {
-                                        warn!(error = %e, "signing failed, forwarding original");
-                                        vec![message]
+                                        metrics::counter!("relay_signing_failures_total").increment(1);
+                                        if self.signing_fail_open {
+                                            warn!(error = %e, "signing failed, forwarding unsigned (fail-open)");
+                                            vec![message]
+                                        } else {
+                                            warn!(error = %e, "signing failed, dropping message (fail-closed)");
+                                            if let Some(ref state) = self.shared_state {
+                                                state.counters().increment_dropped();
+                                            }
+                                            messages_filtered += 1;
+                                            continue;
+                                        }
                                     }
                                 }
                             } else {
