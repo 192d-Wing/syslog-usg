@@ -1,8 +1,8 @@
 [advisories]
 vulnerability = "deny"
-unmaintained = "workspace"
-yanked = "workspace"
-notice = "workspace"
+unmaintained = "warn"
+yanked = "warn"
+notice = "warn"
 
 [licenses]
 unlicensed = "deny"
@@ -20,7 +20,7 @@ allow = [
 confidence-threshold = 0.8
 
 [bans]
-multiple-versions = "workspace"
+multiple-versions = "warn"
 wildcards = "allow"
 
 [sources]
