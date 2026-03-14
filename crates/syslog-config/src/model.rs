@@ -324,7 +324,7 @@ impl Default for MetricsConfig {
 }
 
 fn default_metrics_bind() -> String {
-    String::from("0.0.0.0:9090")
+    String::from("127.0.0.1:9090")
 }
 
 // ---------------------------------------------------------------------------

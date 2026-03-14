@@ -437,7 +437,7 @@ mod tests {
         assert_eq!(cfg.logging.level, "info");
         assert_eq!(cfg.logging.format, LogFormat::Text);
         assert!(!cfg.metrics.enabled);
-        assert_eq!(cfg.metrics.bind_address, "0.0.0.0:9090");
+        assert_eq!(cfg.metrics.bind_address, "127.0.0.1:9090");
     }
 
     #[test]
