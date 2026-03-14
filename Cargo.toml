@@ -86,7 +86,7 @@ regex = "1"
 bitflags = "2"
 
 # Misc
-compact_str = { version = "0.8", features = ["serde"] }
+compact_str = { version = "0.9", features = ["serde"] }
 tokio-graceful-shutdown = "0.15"
 
 [workspace.lints.rust]
