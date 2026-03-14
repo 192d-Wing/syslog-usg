@@ -8,8 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use rustls::ServerConfig;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use tracing::info;
 
 use crate::error::TransportError;
@@ -54,20 +53,20 @@ pub fn build_server_config(config: &TlsConfig) -> Result<Arc<ServerConfig>, Tran
 
 /// Load PEM-encoded certificates from a file.
 fn load_certs(path: &str) -> Result<Vec<CertificateDer<'static>>, TransportError> {
-    let file = std::fs::File::open(Path::new(path)).map_err(|e| {
-        TransportError::Io(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("cert file {path}: {e}"),
-        ))
-    })?;
-    let mut reader = io::BufReader::new(file);
-    let certs_result: Result<Vec<_>, _> = certs(&mut reader).collect();
-    let certs = certs_result.map_err(|e| {
-        TransportError::Io(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("invalid cert: {e}"),
-        ))
-    })?;
+    let certs = CertificateDer::pem_file_iter(Path::new(path))
+        .map_err(|e| {
+            TransportError::Io(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("cert file {path}: {e}"),
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| {
+            TransportError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid cert: {e}"),
+            ))
+        })?;
     if certs.is_empty() {
         return Err(TransportError::InvalidFrame(
             "no certificates found in file".to_owned(),
@@ -76,40 +75,12 @@ fn load_certs(path: &str) -> Result<Vec<CertificateDer<'static>>, TransportError
     Ok(certs)
 }
 
-/// Load a PEM-encoded private key from a file. Tries PKCS#8 first, then RSA.
+/// Load a PEM-encoded private key from a file. Accepts PKCS#8, PKCS#1, or SEC1 keys.
 fn load_private_key(path: &str) -> Result<PrivateKeyDer<'static>, TransportError> {
-    let file = std::fs::File::open(Path::new(path)).map_err(|e| {
+    PrivateKeyDer::from_pem_file(Path::new(path)).map_err(|e| {
         TransportError::Io(io::Error::new(
-            io::ErrorKind::NotFound,
+            io::ErrorKind::InvalidData,
             format!("key file {path}: {e}"),
         ))
-    })?;
-    let mut reader = io::BufReader::new(file);
-
-    // Try PKCS#8 first
-    let pkcs8_keys: Result<Vec<_>, _> = pkcs8_private_keys(&mut reader).collect();
-    if let Ok(keys) = pkcs8_keys {
-        if let Some(key) = keys.into_iter().next() {
-            return Ok(PrivateKeyDer::Pkcs8(key));
-        }
-    }
-
-    // Rewind and try RSA
-    let file = std::fs::File::open(Path::new(path)).map_err(|e| {
-        TransportError::Io(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("key file {path}: {e}"),
-        ))
-    })?;
-    let mut reader = io::BufReader::new(file);
-    let rsa_keys: Result<Vec<_>, _> = rsa_private_keys(&mut reader).collect();
-    if let Ok(keys) = rsa_keys {
-        if let Some(key) = keys.into_iter().next() {
-            return Ok(PrivateKeyDer::Pkcs1(key));
-        }
-    }
-
-    Err(TransportError::InvalidFrame(
-        "no private key found in file".to_owned(),
-    ))
+    })
 }
