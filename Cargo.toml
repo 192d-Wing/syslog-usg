@@ -40,7 +40,7 @@ tokio-stream = "0.1"
 # TLS
 tokio-rustls = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
-webpki-roots = "0.26"
+webpki-roots = "1"
 
 # Buffers
 bytes = "1"
@@ -57,7 +57,7 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 
 # Metrics
 metrics = "0.24"
-metrics-exporter-prometheus = "0.16"
+metrics-exporter-prometheus = "0.18"
 
 # Time
 time = { version = "0.3.47", features = ["serde", "parsing", "formatting"] }
@@ -75,7 +75,7 @@ hyper = "1"
 tower = "0.5"
 
 # Benchmarks
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 # Crypto (signing)
 ring = { version = "0.17", default-features = false }
@@ -86,11 +86,11 @@ regex = "1"
 bitflags = "2"
 
 # Networking
-socket2 = { version = "0.5", features = ["all"] }
+socket2 = { version = "0.6", features = ["all"] }
 
 # Misc
-compact_str = { version = "0.8", features = ["serde"] }
-tokio-graceful-shutdown = "0.15"
+compact_str = { version = "0.9", features = ["serde"] }
+tokio-graceful-shutdown = "0.19"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
