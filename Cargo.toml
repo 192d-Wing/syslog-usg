@@ -75,7 +75,7 @@ hyper = "1"
 tower = "0.5"
 
 # Benchmarks
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.7", features = ["html_reports"] }
 
 # Crypto (signing)
 ring = { version = "0.17", default-features = false }
