@@ -10,7 +10,10 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+syslog-mgmt = { workspace = true }
+syslog-proto = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+regex = { workspace = true }

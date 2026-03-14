@@ -10,6 +10,7 @@ bitflags! {
     ///
     /// RFC 9742 §5 — implementations report which features they support.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[repr(transparent)]
     pub struct SyslogFeatures: u32 {
         /// UDP transport (RFC 5426).
         const UDP_TRANSPORT  = 0b0000_0000_0001;
@@ -65,6 +66,57 @@ impl SyslogFeatures {
             | Self::RFC3164_FORMAT
             | Self::STRUCTURED_DATA
             | Self::RELAY
+    }
+}
+
+impl SyslogFeatures {
+    /// Returns the list of feature flag names that are set.
+    #[must_use]
+    pub fn flag_names(self) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        if self.contains(Self::UDP_TRANSPORT) {
+            names.push("udp_transport");
+        }
+        if self.contains(Self::TCP_TRANSPORT) {
+            names.push("tcp_transport");
+        }
+        if self.contains(Self::TLS_TRANSPORT) {
+            names.push("tls_transport");
+        }
+        if self.contains(Self::DTLS_TRANSPORT) {
+            names.push("dtls_transport");
+        }
+        if self.contains(Self::RFC5424_FORMAT) {
+            names.push("rfc5424_format");
+        }
+        if self.contains(Self::RFC3164_FORMAT) {
+            names.push("rfc3164_format");
+        }
+        if self.contains(Self::STRUCTURED_DATA) {
+            names.push("structured_data");
+        }
+        if self.contains(Self::SIGNING) {
+            names.push("signing");
+        }
+        if self.contains(Self::RELAY) {
+            names.push("relay");
+        }
+        if self.contains(Self::ALARM) {
+            names.push("alarm");
+        }
+        names
+    }
+}
+
+impl serde::Serialize for SyslogFeatures {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let names = self.flag_names();
+        let mut seq = serializer.serialize_seq(Some(names.len()))?;
+        for name in &names {
+            seq.serialize_element(name)?;
+        }
+        seq.end()
     }
 }
 
@@ -167,5 +219,47 @@ mod tests {
         let removed = f - SyslogFeatures::UDP_TRANSPORT;
         assert!(!removed.contains(SyslogFeatures::UDP_TRANSPORT));
         assert!(removed.contains(SyslogFeatures::TCP_TRANSPORT));
+    }
+
+    #[test]
+    fn flag_names_empty() {
+        let f = SyslogFeatures::empty();
+        assert!(f.flag_names().is_empty());
+    }
+
+    #[test]
+    fn flag_names_single() {
+        let f = SyslogFeatures::SIGNING;
+        assert_eq!(f.flag_names(), vec!["signing"]);
+    }
+
+    #[test]
+    fn flag_names_multiple() {
+        let f = SyslogFeatures::UDP_TRANSPORT | SyslogFeatures::RELAY;
+        let names = f.flag_names();
+        assert!(names.contains(&"udp_transport"));
+        assert!(names.contains(&"relay"));
+        assert_eq!(names.len(), 2);
+    }
+
+    #[test]
+    fn serialize_features_to_json() {
+        let f = SyslogFeatures::UDP_TRANSPORT | SyslogFeatures::TLS_TRANSPORT;
+        let json = match serde_json::to_string(&f) {
+            Ok(j) => j,
+            Err(_) => return,
+        };
+        assert!(json.contains("udp_transport"));
+        assert!(json.contains("tls_transport"));
+    }
+
+    #[test]
+    fn serialize_empty_features() {
+        let f = SyslogFeatures::empty();
+        let json = match serde_json::to_string(&f) {
+            Ok(j) => j,
+            Err(_) => return,
+        };
+        assert_eq!(json, "[]");
     }
 }

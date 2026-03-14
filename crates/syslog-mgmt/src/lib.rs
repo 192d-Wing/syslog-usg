@@ -33,4 +33,4 @@ pub use feature::SyslogFeatures;
 pub use model::SyslogConfig;
 pub use pattern::Pattern;
 pub use selector::Selector;
-pub use state::{MessageCounters, SyslogState};
+pub use state::{AtomicMessageCounters, MessageCounters, SharedSyslogState, SyslogState};

@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 syslog-proto = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }
 compact_str = { workspace = true }
 regex = { workspace = true }
