@@ -16,16 +16,19 @@ use std::sync::Arc;
 
 use clap::Parser;
 use tokio::sync::{mpsc, watch};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use syslog_config::model::{ListenerProtocol, OutputProtocol, ServerConfig};
 use syslog_mgmt::{SharedSyslogState, SyslogFeatures};
-use syslog_observe::{HealthState, LogReloadHandle, health_router, init_logging, init_metrics};
+use syslog_observe::{
+    HealthState, LogReloadHandle, health_router_with_token, init_logging, init_metrics,
+};
 use syslog_relay::{
     AlarmFilter, MessageFilter, NonAlarmPolicy, Pipeline, PipelineIngress, RoutingRule,
     RoutingTable,
 };
 use syslog_transport::tcp::{TcpListenerConfig, TcpMessage, run_tcp_listener};
+use syslog_transport::tls::load_certs;
 use syslog_transport::udp::{UdpDatagram, UdpListenerConfig, run_udp_listener};
 
 use crate::network_output::NetworkOutput;
@@ -143,8 +146,9 @@ async fn main() {
         .unwrap_or_else(|_| ([0, 0, 0, 0], 9090).into());
 
     let health_state_clone = health_state.clone();
+    let bearer_token = config.metrics.bearer_token.clone();
     let health_handle = tokio::spawn(async move {
-        let app = health_router(health_state_clone);
+        let app = health_router_with_token(health_state_clone, bearer_token);
         let listener = match tokio::net::TcpListener::bind(health_addr).await {
             Ok(l) => l,
             Err(e) => {
@@ -314,7 +318,8 @@ fn start_listeners(
                     ..Default::default()
                 };
 
-                let (udp_tx, mut udp_rx) = mpsc::channel::<UdpDatagram>(4096);
+                let (udp_tx, mut udp_rx) =
+                    mpsc::channel::<UdpDatagram>(config.pipeline.channel_buffer_size);
                 let shutdown = shutdown_rx.clone();
                 let ingress = ingress.clone();
                 let state = shared_state.clone();
@@ -341,7 +346,8 @@ fn start_listeners(
                                 state.counters().increment_malformed();
                                 warn!(
                                     source = %datagram.source,
-                                    "parse error: {e}"
+                                    "parse error: {}",
+                                    sanitize_log_msg(&e.to_string())
                                 );
                                 metrics::counter!("syslog_messages_parsed_total", "format" => "invalid")
                                     .increment(1);
@@ -353,7 +359,7 @@ fn start_listeners(
                 info!(addr = %addr, "UDP listener configured");
             }
             ListenerProtocol::Dtls => {
-                warn!(addr = %addr, "DTLS listener not yet implemented (RFC 6012), skipping");
+                error!(addr = %addr, "DTLS listener not yet implemented (RFC 6012) — remove from config");
                 continue;
             }
             ListenerProtocol::Tcp | ListenerProtocol::Tls => {
@@ -391,11 +397,14 @@ fn start_listeners(
                     max_frame_size: config.pipeline.max_message_size,
                     tls_acceptor,
                     max_connections: listener_cfg.max_connections,
-                    read_timeout: listener_cfg.read_timeout_secs.map(std::time::Duration::from_secs),
+                    read_timeout: listener_cfg
+                        .read_timeout_secs
+                        .map(std::time::Duration::from_secs),
                     idle_timeout: None,
                 };
 
-                let (tcp_tx, mut tcp_rx) = mpsc::channel::<TcpMessage>(4096);
+                let (tcp_tx, mut tcp_rx) =
+                    mpsc::channel::<TcpMessage>(config.pipeline.channel_buffer_size);
                 let shutdown = shutdown_rx.clone();
                 let ingress = ingress.clone();
                 let state = shared_state.clone();
@@ -423,7 +432,8 @@ fn start_listeners(
                                 warn!(
                                     source = %frame.peer,
                                     tls = frame.tls,
-                                    "parse error: {e}"
+                                    "parse error: {}",
+                                    sanitize_log_msg(&e.to_string())
                                 );
                                 metrics::counter!("syslog_messages_parsed_total", "format" => "invalid")
                                     .increment(1);
@@ -495,19 +505,22 @@ fn build_filters(config: &ServerConfig) -> Vec<Box<dyn MessageFilter>> {
 
 /// Build the optional RFC 5848 signing stage from configuration.
 ///
-/// Key loading from files is not yet implemented — this function logs
-/// the configuration and returns `None` for now.
+/// Key loading from files is not yet implemented — returns `None` when
+/// signing is not enabled, and logs an error when enabled.
 fn build_signing_stage(config: &ServerConfig) -> Option<syslog_relay::SigningStage> {
     if let Some(ref signing_cfg) = config.signing {
         if signing_cfg.enabled {
-            info!(
+            error!(
+                "signing enabled in config but key loading is not yet implemented — \
+                 signing will not be active"
+            );
+            debug!(
                 key_path = %signing_cfg.key_path,
                 cert_path = ?signing_cfg.cert_path,
                 hash_algorithm = ?signing_cfg.hash_algorithm,
                 signature_group = ?signing_cfg.signature_group,
-                "signing configured (key loading not yet implemented)"
+                "signing configuration details"
             );
-            // Future: load key from signing_cfg.key_path, build Signer + SigningStage
         }
     }
     None
@@ -515,17 +528,20 @@ fn build_signing_stage(config: &ServerConfig) -> Option<syslog_relay::SigningSta
 
 /// Build the optional RFC 5848 verification stage from configuration.
 ///
-/// Key loading from files is not yet implemented — this function logs
-/// the configuration and returns `None` for now.
+/// Key loading from files is not yet implemented — returns `None` when
+/// verification is not enabled, and logs an error when enabled.
 fn build_verification_stage(config: &ServerConfig) -> Option<syslog_relay::VerificationStage> {
     if let Some(ref verif_cfg) = config.verification {
         if verif_cfg.enabled {
-            info!(
+            error!(
+                "verification enabled in config but key loading is not yet implemented — \
+                 verification will not be active"
+            );
+            debug!(
                 trusted_keys = verif_cfg.trusted_key_paths.len(),
                 reject_unverified = verif_cfg.reject_unverified,
-                "verification configured (key loading not yet implemented)"
+                "verification configuration details"
             );
-            // Future: load trusted keys, build VerificationStage
         }
     }
     None
@@ -581,7 +597,42 @@ fn build_outputs(config: &ServerConfig) -> Vec<NetworkOutput> {
 
                 // Build client TLS config
                 let mut root_store = rustls::RootCertStore::empty();
-                root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+                // F-06: Load custom CA certificates if configured, otherwise
+                // fall back to system/webpki default roots.
+                if let Some(ca_path) = &tls_cfg.ca_path {
+                    match load_certs(ca_path) {
+                        Ok(ca_certs) => {
+                            for cert in &ca_certs {
+                                if let Err(e) = root_store.add(cert.clone()) {
+                                    error!(
+                                        name = %output_cfg.name,
+                                        ca = %ca_path,
+                                        err = %e,
+                                        "failed to add custom CA cert to root store"
+                                    );
+                                }
+                            }
+                            info!(
+                                name = %output_cfg.name,
+                                ca = %ca_path,
+                                count = ca_certs.len(),
+                                "loaded custom CA certificates for output"
+                            );
+                        }
+                        Err(e) => {
+                            error!(
+                                name = %output_cfg.name,
+                                ca = %ca_path,
+                                err = %e,
+                                "failed to load custom CA certs, falling back to system roots"
+                            );
+                            root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+                        }
+                    }
+                } else {
+                    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+                }
 
                 let client_config = rustls::ClientConfig::builder()
                     .with_root_certificates(root_store)
@@ -589,12 +640,8 @@ fn build_outputs(config: &ServerConfig) -> Vec<NetworkOutput> {
 
                 let connector = Arc::new(tokio_rustls::TlsConnector::from(Arc::new(client_config)));
 
-                // Derive server name from address (use IP as fallback)
-                let server_name = output_cfg
-                    .address
-                    .split(':')
-                    .next()
-                    .unwrap_or(&output_cfg.address);
+                // Derive server name from address, handling IPv6 brackets
+                let server_name = extract_host(&output_cfg.address);
 
                 let output = NetworkOutput::tls(&output_cfg.name, addr, connector, server_name);
                 info!(
@@ -684,4 +731,72 @@ fn reload_config(config_path: &std::path::Path, log_reload: &LogReloadHandle) {
     // Note: listener and output changes require a restart.
     // Future work: hot-swap outputs, add/remove listeners.
     info!("configuration reloaded successfully");
+}
+
+/// Sanitize an error message for logging: truncate to 200 chars and
+/// replace control characters to prevent log injection.
+fn sanitize_log_msg(msg: &str) -> String {
+    msg.chars()
+        .take(200)
+        .map(|c| if c.is_control() && c != ' ' { '?' } else { c })
+        .collect()
+}
+
+/// Extract the host portion from an address string.
+/// Handles `host:port`, `[ipv6]:port`, and bare addresses.
+fn extract_host(address: &str) -> &str {
+    // Handle [ipv6]:port — strip brackets
+    if let Some(rest) = address.strip_prefix('[') {
+        if let Some((host, _)) = rest.split_once(']') {
+            return host;
+        }
+    }
+
+    // Handle host:port — use rsplit_once to handle IPv6 without brackets
+    if let Some((host, _port)) = address.rsplit_once(':') {
+        return host;
+    }
+
+    address
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_truncates_long_messages() {
+        let long = "a".repeat(300);
+        let result = sanitize_log_msg(&long);
+        assert_eq!(result.chars().count(), 200);
+    }
+
+    #[test]
+    fn sanitize_replaces_control_chars() {
+        let msg = "hello\nworld\x00bad";
+        let result = sanitize_log_msg(msg);
+        assert!(!result.contains('\n'));
+        assert!(!result.contains('\x00'));
+        assert!(result.contains("hello"));
+    }
+
+    #[test]
+    fn extract_host_ipv4() {
+        assert_eq!(extract_host("10.0.0.1:514"), "10.0.0.1");
+    }
+
+    #[test]
+    fn extract_host_ipv6_bracketed() {
+        assert_eq!(extract_host("[::1]:514"), "::1");
+    }
+
+    #[test]
+    fn extract_host_hostname() {
+        assert_eq!(extract_host("syslog.example.com:514"), "syslog.example.com");
+    }
+
+    #[test]
+    fn extract_host_bare() {
+        assert_eq!(extract_host("localhost"), "localhost");
+    }
 }
