@@ -40,7 +40,7 @@ tokio-stream = "0.1"
 # TLS
 tokio-rustls = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
-webpki-roots = "0.26"
+webpki-roots = "1.0"
 
 # Buffers
 bytes = "1"
