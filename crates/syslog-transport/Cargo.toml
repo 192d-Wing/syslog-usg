@@ -22,3 +22,6 @@ socket2 = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 metrics = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

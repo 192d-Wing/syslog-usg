@@ -1,0 +1,87 @@
+[package]
+name = "syslog-usg-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+bytes = "1"
+tokio-util = { version = "0.7", features = ["codec"] }
+
+[dependencies.syslog-proto]
+path = "../crates/syslog-proto"
+
+[dependencies.syslog-parse]
+path = "../crates/syslog-parse"
+
+[dependencies.syslog-transport]
+path = "../crates/syslog-transport"
+
+[dependencies.syslog-config]
+path = "../crates/syslog-config"
+
+[workspace]
+members = ["."]
+
+# --- Fuzz targets ---
+
+[[bin]]
+name = "fuzz_parse_auto"
+path = "fuzz_targets/fuzz_parse_auto.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_parse_rfc5424"
+path = "fuzz_targets/fuzz_parse_rfc5424.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_parse_rfc3164"
+path = "fuzz_targets/fuzz_parse_rfc3164.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_structured_data"
+path = "fuzz_targets/fuzz_structured_data.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_octet_counting"
+path = "fuzz_targets/fuzz_octet_counting.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_pri"
+path = "fuzz_targets/fuzz_pri.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_config"
+path = "fuzz_targets/fuzz_config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_roundtrip"
+path = "fuzz_targets/fuzz_roundtrip.rs"
+test = false
+doc = false
+bench = false

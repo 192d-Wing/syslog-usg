@@ -248,8 +248,11 @@ impl<O: Output> Pipeline<O> {
             tokio::select! {
                 biased;
 
-                _ = self.shutdown.changed() => {
-                    if *self.shutdown.borrow() {
+                result = self.shutdown.changed() => {
+                    // If the sender was dropped (Err), or the value is true,
+                    // shut down the pipeline. This prevents a busy-loop when
+                    // the ShutdownHandle is dropped without sending `true`.
+                    if result.is_err() || *self.shutdown.borrow() {
                         self.flush_signing_to_all().await;
 
                         info!(

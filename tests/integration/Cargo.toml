@@ -20,9 +20,15 @@ panic = "allow"
 name = "end_to_end"
 path = "end_to_end.rs"
 
+[[test]]
+name = "hardening"
+path = "hardening.rs"
+
 [dependencies]
 syslog-proto = { workspace = true }
 syslog-parse = { workspace = true }
 syslog-transport = { workspace = true }
 syslog-relay = { workspace = true }
 tokio = { workspace = true }
+bytes = { workspace = true }
+tokio-util = { workspace = true }

@@ -16,3 +16,6 @@ compact_str = { workspace = true }
 smallvec = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

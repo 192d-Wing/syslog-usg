@@ -88,6 +88,9 @@ bitflags = "2"
 # Networking
 socket2 = { version = "0.6", features = ["all"] }
 
+# Property-based testing
+proptest = "1"
+
 # Misc
 compact_str = { version = "0.9", features = ["serde"] }
 tokio-graceful-shutdown = "0.19"
