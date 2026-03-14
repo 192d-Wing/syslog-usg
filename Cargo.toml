@@ -85,6 +85,9 @@ base64 = "0.22"
 regex = "1"
 bitflags = "2"
 
+# Networking
+socket2 = { version = "0.5", features = ["all"] }
+
 # Misc
 compact_str = { version = "0.8", features = ["serde"] }
 tokio-graceful-shutdown = "0.15"
