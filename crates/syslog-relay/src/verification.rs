@@ -46,6 +46,11 @@ impl VerificationStage {
     /// - `reject_unverified`: If true, messages without valid signatures are rejected.
     #[must_use]
     pub fn new(verifiers: Vec<Verifier>, reject_unverified: bool) -> Self {
+        if verifiers.is_empty() {
+            warn!(
+                "verification stage created with no trusted keys — all signatures will fail verification"
+            );
+        }
         Self {
             verifiers,
             reject_unverified,
