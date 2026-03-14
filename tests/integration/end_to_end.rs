@@ -128,6 +128,9 @@ async fn tcp_end_to_end() {
         bind_addr: listen_addr,
         max_frame_size: 64 * 1024,
         tls_acceptor: None,
+        max_connections: None,
+        read_timeout: None,
+        idle_timeout: None,
     };
 
     let (tcp_tx, mut tcp_rx) = mpsc::channel::<TcpMessage>(64);
@@ -217,6 +220,9 @@ async fn tcp_multiple_messages() {
         bind_addr: listen_addr,
         max_frame_size: 64 * 1024,
         tls_acceptor: None,
+        max_connections: None,
+        read_timeout: None,
+        idle_timeout: None,
     };
 
     let (tcp_tx, mut tcp_rx) = mpsc::channel::<TcpMessage>(64);

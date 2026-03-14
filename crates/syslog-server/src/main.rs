@@ -390,6 +390,9 @@ fn start_listeners(
                     bind_addr: addr,
                     max_frame_size: config.pipeline.max_message_size,
                     tls_acceptor,
+                    max_connections: listener_cfg.max_connections,
+                    read_timeout: listener_cfg.read_timeout_secs.map(std::time::Duration::from_secs),
+                    idle_timeout: None,
                 };
 
                 let (tcp_tx, mut tcp_rx) = mpsc::channel::<TcpMessage>(4096);

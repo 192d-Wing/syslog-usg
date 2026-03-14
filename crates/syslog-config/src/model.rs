@@ -97,6 +97,14 @@ pub struct ListenerConfig {
 
     /// Optional TLS settings (required when `protocol` is `tls`).
     pub tls: Option<TlsConfig>,
+
+    /// Maximum concurrent connections for TCP/TLS listeners.
+    #[serde(default)]
+    pub max_connections: Option<usize>,
+
+    /// Per-frame read timeout in seconds for TCP/TLS listeners.
+    #[serde(default)]
+    pub read_timeout_secs: Option<u64>,
 }
 
 /// TLS configuration shared by listeners and outputs.
