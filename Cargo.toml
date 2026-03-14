@@ -57,7 +57,7 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 
 # Metrics
 metrics = "0.24"
-metrics-exporter-prometheus = "0.16"
+metrics-exporter-prometheus = "0.18"
 
 # Time
 time = { version = "0.3.47", features = ["serde", "parsing", "formatting"] }
