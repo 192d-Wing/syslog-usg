@@ -19,3 +19,5 @@ time = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+syslog_rfc5424 = "0.10"
+syslog_loose = "0.23"
