@@ -10,7 +10,7 @@ use std::sync::Arc;
 use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use rustls::server::WebPkiClientVerifier;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::error::TransportError;
 
@@ -95,16 +95,18 @@ pub fn build_server_config(config: &TlsConfig) -> Result<Arc<ServerConfig>, Tran
 pub fn load_certs(path: &str) -> Result<Vec<CertificateDer<'static>>, TransportError> {
     let certs = CertificateDer::pem_file_iter(Path::new(path))
         .map_err(|e| {
+            debug!(path = %path, error = %e, "failed to open certificate file");
             TransportError::Io(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("cert file {path}: {e}"),
+                "failed to open certificate file",
             ))
         })?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| {
+            debug!(path = %path, error = %e, "invalid certificate data");
             TransportError::Io(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("invalid cert: {e}"),
+                "invalid certificate data",
             ))
         })?;
     if certs.is_empty() {
@@ -118,9 +120,10 @@ pub fn load_certs(path: &str) -> Result<Vec<CertificateDer<'static>>, TransportE
 /// Load a PEM-encoded private key from a file. Accepts PKCS#8, PKCS#1, or SEC1 keys.
 fn load_private_key(path: &str) -> Result<PrivateKeyDer<'static>, TransportError> {
     PrivateKeyDer::from_pem_file(Path::new(path)).map_err(|e| {
+        debug!(path = %path, error = %e, "failed to load private key");
         TransportError::Io(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("key file {path}: {e}"),
+            "failed to load private key",
         ))
     })
 }
