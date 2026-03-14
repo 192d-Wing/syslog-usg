@@ -60,6 +60,24 @@ impl StructuredData {
         self.0.iter().find(|el| el.id.as_str() == id)
     }
 
+    /// Returns a new `StructuredData` with any elements whose SD-ID matches
+    /// one of the given `ids` removed.
+    #[must_use]
+    pub fn without_ids(&self, ids: &[&str]) -> Self {
+        let filtered: SmallVec<[SdElement; 2]> = self
+            .0
+            .iter()
+            .filter(|el| !ids.contains(&el.id.as_str()))
+            .cloned()
+            .collect();
+        Self(filtered)
+    }
+
+    /// Append an SD element to this structured data.
+    pub fn push(&mut self, element: SdElement) {
+        self.0.push(element);
+    }
+
     /// Estimate the byte size of this structured data for queue accounting.
     ///
     /// This is a rough estimate, not an exact serialized size.
@@ -190,5 +208,40 @@ mod tests {
     fn default_is_nil() {
         let sd = StructuredData::default();
         assert!(sd.is_nil());
+    }
+
+    #[test]
+    fn without_ids_removes_matching() {
+        let el1 = make_element("origin", &[("ip", "10.0.0.1")]);
+        let el2 = make_element("ssign", &[("VER", "0122")]);
+        let el3 = make_element("meta", &[("seq", "1")]);
+        let sd = StructuredData(SmallVec::from_vec(vec![el1, el2, el3]));
+        let filtered = sd.without_ids(&["ssign"]);
+        assert_eq!(filtered.0.len(), 2);
+        assert!(filtered.find_by_id("ssign").is_none());
+        assert!(filtered.find_by_id("origin").is_some());
+        assert!(filtered.find_by_id("meta").is_some());
+    }
+
+    #[test]
+    fn without_ids_removes_multiple() {
+        let el1 = make_element("ssign", &[("VER", "0122")]);
+        let el2 = make_element("ssign-cert", &[("VER", "0122")]);
+        let el3 = make_element("origin", &[("ip", "10.0.0.1")]);
+        let sd = StructuredData(SmallVec::from_vec(vec![el1, el2, el3]));
+        let filtered = sd.without_ids(&["ssign", "ssign-cert"]);
+        assert_eq!(filtered.0.len(), 1);
+        assert!(filtered.find_by_id("origin").is_some());
+    }
+
+    #[test]
+    fn push_appends_element() {
+        let mut sd = StructuredData::nil();
+        assert!(sd.is_nil());
+        let el = make_element("origin", &[("ip", "10.0.0.1")]);
+        sd.push(el);
+        assert!(!sd.is_nil());
+        assert_eq!(sd.0.len(), 1);
+        assert!(sd.find_by_id("origin").is_some());
     }
 }

@@ -27,6 +27,14 @@ pub struct ServerConfig {
     #[serde(default)]
     pub pipeline: PipelineConfig,
 
+    /// RFC 5848 message signing configuration.
+    #[serde(default)]
+    pub signing: Option<SigningConfig>,
+
+    /// RFC 5848 message verification configuration.
+    #[serde(default)]
+    pub verification: Option<VerificationConfig>,
+
     /// Logging settings.
     #[serde(default)]
     pub logging: LoggingConfig,
@@ -34,6 +42,10 @@ pub struct ServerConfig {
     /// Prometheus metrics settings.
     #[serde(default)]
     pub metrics: MetricsConfig,
+
+    /// Management actions (RFC 9742 selector + action pairs).
+    #[serde(default)]
+    pub actions: Vec<MgmtActionConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -149,6 +161,35 @@ pub struct PipelineConfig {
     /// Maximum accepted syslog message size in bytes.
     #[serde(default = "default_max_message_size")]
     pub max_message_size: usize,
+
+    /// Optional alarm filter configuration (RFC 5674).
+    #[serde(default)]
+    pub alarm_filter: Option<AlarmFilterConfig>,
+}
+
+/// RFC 5674 alarm-aware filter configuration.
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub struct AlarmFilterConfig {
+    /// Whether the alarm filter is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Minimum perceived severity (e.g., "major", "critical").
+    pub min_severity: Option<String>,
+
+    /// Allowed ITU event type names (e.g., "communicationsAlarm").
+    #[serde(default)]
+    pub event_types: Vec<String>,
+
+    /// Resource substring patterns for matching.
+    #[serde(default)]
+    pub resource_patterns: Vec<String>,
+
+    /// Policy for non-alarm messages: "pass" (default) or "drop".
+    pub non_alarm_policy: Option<String>,
+
+    /// Maximum number of active alarms to track in the state table.
+    pub max_active_alarms: Option<usize>,
 }
 
 impl Default for PipelineConfig {
@@ -156,6 +197,7 @@ impl Default for PipelineConfig {
         Self {
             channel_buffer_size: default_channel_buffer_size(),
             max_message_size: default_max_message_size(),
+            alarm_filter: None,
         }
     }
 }
@@ -166,6 +208,56 @@ fn default_channel_buffer_size() -> usize {
 
 fn default_max_message_size() -> usize {
     8192
+}
+
+// ---------------------------------------------------------------------------
+// Signing (RFC 5848)
+// ---------------------------------------------------------------------------
+
+/// RFC 5848 message signing configuration.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct SigningConfig {
+    /// Whether signing is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Path to the PKCS#8 DER-encoded private key file.
+    pub key_path: String,
+
+    /// Path to the DER-encoded X.509 certificate file (optional).
+    pub cert_path: Option<String>,
+
+    /// Hash algorithm: "sha256" (default) or "sha1".
+    pub hash_algorithm: Option<String>,
+
+    /// Signature group mode: "global" (default), "per-pri", "pri-ranges", "custom".
+    pub signature_group: Option<String>,
+
+    /// Maximum number of message hashes per signature block.
+    pub max_hashes_per_block: Option<usize>,
+
+    /// How often (seconds) to emit certificate blocks.
+    pub cert_emit_interval_secs: Option<u64>,
+}
+
+// ---------------------------------------------------------------------------
+// Verification (RFC 5848)
+// ---------------------------------------------------------------------------
+
+/// RFC 5848 message verification configuration.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct VerificationConfig {
+    /// Whether verification is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Paths to trusted public key files (PKCS#8 DER-encoded).
+    #[serde(default)]
+    pub trusted_key_paths: Vec<String>,
+
+    /// Whether to reject messages that cannot be verified.
+    #[serde(default)]
+    pub reject_unverified: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -233,4 +325,66 @@ impl Default for MetricsConfig {
 
 fn default_metrics_bind() -> String {
     String::from("0.0.0.0:9090")
+}
+
+// ---------------------------------------------------------------------------
+// Management Actions (RFC 9742)
+// ---------------------------------------------------------------------------
+
+/// A management action from the RFC 9742 YANG model: selector + action type.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct MgmtActionConfig {
+    /// Optional human-readable description.
+    pub description: Option<String>,
+    /// Selector criteria for matching messages.
+    #[serde(default)]
+    pub selector: SelectorConfig,
+    /// The action to take on matching messages.
+    pub action: ActionTypeConfig,
+}
+
+/// Selector criteria for matching syslog messages.
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub struct SelectorConfig {
+    /// Facility names to match (e.g., ["kern", "user"]).
+    pub facilities: Option<Vec<String>>,
+    /// Minimum severity name (most urgent bound).
+    pub min_severity: Option<String>,
+    /// Maximum severity name (least urgent bound).
+    pub max_severity: Option<String>,
+    /// Regex pattern for hostname matching.
+    pub hostname_pattern: Option<String>,
+    /// Regex pattern for app_name matching.
+    pub app_name_pattern: Option<String>,
+}
+
+/// The action type to take on matching messages.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ActionTypeConfig {
+    /// Write to the system console / stdout.
+    Console,
+    /// Write to a file.
+    File {
+        /// Destination file path.
+        path: String,
+    },
+    /// Forward to a remote syslog receiver.
+    Remote {
+        /// Remote host address.
+        host: String,
+        /// Remote port number.
+        port: u16,
+        /// Transport protocol: "udp", "tcp", or "tls".
+        protocol: String,
+    },
+    /// Buffer messages in a named in-memory buffer.
+    Buffer {
+        /// Buffer name.
+        name: String,
+        /// Maximum number of messages to buffer.
+        size: usize,
+    },
+    /// Discard matching messages.
+    Discard,
 }

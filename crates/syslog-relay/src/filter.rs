@@ -1,9 +1,23 @@
-//! Message filtering based on severity threshold.
+//! Message filtering based on severity threshold and a generic filter trait.
 //!
 //! A [`SeverityFilter`] passes messages whose severity is at least as urgent
-//! as a configurable threshold level.
+//! as a configurable threshold level. The [`MessageFilter`] trait provides a
+//! unified interface for all filter types in the relay pipeline.
 
 use syslog_proto::{Severity, SyslogMessage};
+
+/// Trait for pipeline message filters.
+///
+/// Implementors decide whether a given syslog message should pass through
+/// or be dropped by the pipeline.
+pub trait MessageFilter: Send + Sync + std::fmt::Debug {
+    /// Returns the display name of this filter (for logging/metrics).
+    fn name(&self) -> &str;
+
+    /// Returns `true` if the message should pass (be forwarded), or
+    /// `false` if it should be dropped.
+    fn should_pass(&self, message: &SyslogMessage) -> bool;
+}
 
 /// A filter that passes messages with severity >= the configured threshold.
 ///
@@ -37,6 +51,16 @@ impl SeverityFilter {
     #[must_use]
     pub fn should_pass(&self, message: &SyslogMessage) -> bool {
         message.severity.is_at_least(self.threshold)
+    }
+}
+
+impl MessageFilter for SeverityFilter {
+    fn name(&self) -> &str {
+        "severity"
+    }
+
+    fn should_pass(&self, message: &SyslogMessage) -> bool {
+        self.should_pass(message)
     }
 }
 

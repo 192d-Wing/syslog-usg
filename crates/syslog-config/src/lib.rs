@@ -3,13 +3,14 @@
 //! Provides TOML-based configuration with `${VAR}` and `${VAR:-default}`
 //! environment variable expansion.
 
+pub mod convert;
 pub mod error;
 pub mod model;
 
 use std::path::Path;
 
 use crate::error::ConfigError;
-use crate::model::{ListenerProtocol, OutputProtocol, ServerConfig};
+use crate::model::{ActionTypeConfig, ListenerProtocol, OutputProtocol, ServerConfig};
 
 /// Load a [`ServerConfig`] from a TOML file at `path`.
 ///
@@ -162,6 +163,174 @@ fn validate(config: &ServerConfig) -> Result<(), ConfigError> {
         return Err(ConfigError::Validation(
             "pipeline.max_message_size must be > 0".to_owned(),
         ));
+    }
+
+    // Signing configuration validation (RFC 5848).
+    if let Some(ref signing) = config.signing {
+        if signing.enabled {
+            if signing.key_path.is_empty() {
+                return Err(ConfigError::MissingField("signing.key_path".to_owned()));
+            }
+            if let Some(ref algo) = signing.hash_algorithm {
+                let valid = ["sha1", "sha256"];
+                if !valid.contains(&algo.as_str()) {
+                    return Err(ConfigError::Validation(format!(
+                        "signing.hash_algorithm: unknown value {algo:?}, must be one of: {valid:?}"
+                    )));
+                }
+            }
+            if let Some(ref sg) = signing.signature_group {
+                let valid = ["global", "per-pri", "pri-ranges", "custom"];
+                if !valid.contains(&sg.as_str()) {
+                    return Err(ConfigError::Validation(format!(
+                        "signing.signature_group: unknown value {sg:?}, must be one of: {valid:?}"
+                    )));
+                }
+            }
+            if let Some(0) = signing.max_hashes_per_block {
+                return Err(ConfigError::Validation(
+                    "signing.max_hashes_per_block must be > 0".to_owned(),
+                ));
+            }
+        }
+    }
+
+    // Verification configuration validation (RFC 5848).
+    if let Some(ref verification) = config.verification {
+        if verification.enabled && verification.trusted_key_paths.is_empty() {
+            return Err(ConfigError::Validation(
+                "verification.trusted_key_paths must not be empty when verification is enabled"
+                    .to_owned(),
+            ));
+        }
+    }
+
+    // Management action validation (RFC 9742).
+    for (i, action) in config.actions.iter().enumerate() {
+        // Validate facility names if specified.
+        if let Some(ref facilities) = action.selector.facilities {
+            for f_name in facilities {
+                if syslog_proto::Facility::try_from(f_name.as_str()).is_err() {
+                    return Err(ConfigError::Validation(format!(
+                        "actions[{i}].selector.facilities: unknown facility {f_name:?}"
+                    )));
+                }
+            }
+        }
+        // Validate severity names.
+        if let Some(ref sev) = action.selector.min_severity {
+            if syslog_proto::Severity::try_from(sev.as_str()).is_err() {
+                return Err(ConfigError::Validation(format!(
+                    "actions[{i}].selector.min_severity: unknown severity {sev:?}"
+                )));
+            }
+        }
+        if let Some(ref sev) = action.selector.max_severity {
+            if syslog_proto::Severity::try_from(sev.as_str()).is_err() {
+                return Err(ConfigError::Validation(format!(
+                    "actions[{i}].selector.max_severity: unknown severity {sev:?}"
+                )));
+            }
+        }
+        // Validate hostname/app_name patterns compile.
+        if let Some(ref pat) = action.selector.hostname_pattern {
+            if regex::Regex::new(pat).is_err() {
+                return Err(ConfigError::Validation(format!(
+                    "actions[{i}].selector.hostname_pattern: invalid regex {pat:?}"
+                )));
+            }
+        }
+        if let Some(ref pat) = action.selector.app_name_pattern {
+            if regex::Regex::new(pat).is_err() {
+                return Err(ConfigError::Validation(format!(
+                    "actions[{i}].selector.app_name_pattern: invalid regex {pat:?}"
+                )));
+            }
+        }
+        // Validate action type specifics.
+        match &action.action {
+            ActionTypeConfig::Remote { protocol, .. } => {
+                let valid = ["udp", "tcp", "tls"];
+                if !valid.contains(&protocol.as_str()) {
+                    return Err(ConfigError::Validation(format!(
+                        "actions[{i}].action.protocol: must be one of {valid:?}, got {protocol:?}"
+                    )));
+                }
+            }
+            ActionTypeConfig::Buffer { size, .. } => {
+                if *size == 0 {
+                    return Err(ConfigError::Validation(format!(
+                        "actions[{i}].action.size must be > 0"
+                    )));
+                }
+            }
+            ActionTypeConfig::File { path } => {
+                if path.is_empty() {
+                    return Err(ConfigError::Validation(format!(
+                        "actions[{i}].action.path must not be empty"
+                    )));
+                }
+            }
+            ActionTypeConfig::Console | ActionTypeConfig::Discard => {}
+        }
+    }
+
+    // Alarm filter validation (RFC 5674).
+    if let Some(ref af) = config.pipeline.alarm_filter {
+        if af.enabled {
+            // Validate min_severity value if provided.
+            if let Some(ref sev) = af.min_severity {
+                let valid = [
+                    "cleared",
+                    "indeterminate",
+                    "critical",
+                    "major",
+                    "minor",
+                    "warning",
+                ];
+                if !valid.contains(&sev.as_str()) {
+                    return Err(ConfigError::Validation(format!(
+                        "pipeline.alarm_filter.min_severity: unknown value {sev:?}, \
+                         must be one of: {valid:?}"
+                    )));
+                }
+            }
+
+            // Validate event type names.
+            let valid_types = [
+                "other",
+                "communicationsAlarm",
+                "qualityOfServiceAlarm",
+                "processingErrorAlarm",
+                "equipmentAlarm",
+                "environmentalAlarm",
+            ];
+            for et in &af.event_types {
+                if !valid_types.contains(&et.as_str()) {
+                    return Err(ConfigError::Validation(format!(
+                        "pipeline.alarm_filter.event_types: unknown type {et:?}, \
+                         must be one of: {valid_types:?}"
+                    )));
+                }
+            }
+
+            // Validate non_alarm_policy.
+            if let Some(ref policy) = af.non_alarm_policy {
+                if policy != "pass" && policy != "drop" {
+                    return Err(ConfigError::Validation(format!(
+                        "pipeline.alarm_filter.non_alarm_policy: must be \"pass\" or \"drop\", \
+                         got {policy:?}"
+                    )));
+                }
+            }
+
+            // Validate max_active_alarms.
+            if let Some(0) = af.max_active_alarms {
+                return Err(ConfigError::Validation(
+                    "pipeline.alarm_filter.max_active_alarms must be > 0".to_owned(),
+                ));
+            }
+        }
     }
 
     Ok(())

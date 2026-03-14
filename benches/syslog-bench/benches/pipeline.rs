@@ -37,7 +37,7 @@ fn bench_pipeline_throughput(c: &mut Criterion) {
                 rt.block_on(async {
                     let output = ForwardOutput::new("bench");
                     let (pipeline, ingress, _shutdown) =
-                        Pipeline::new(batch_size as usize + 1024, None, vec![output]);
+                        Pipeline::new(batch_size as usize + 1024, vec![], vec![output]);
 
                     let handle = tokio::spawn(async move {
                         let _ = pipeline.run().await;
@@ -70,8 +70,9 @@ fn bench_pipeline_with_filter(c: &mut Criterion) {
             rt.block_on(async {
                 let output = ForwardOutput::new("bench");
                 let filter = syslog_relay::SeverityFilter::new(Severity::Warning);
+                let filters: Vec<Box<dyn syslog_relay::MessageFilter>> = vec![Box::new(filter)];
                 let (pipeline, ingress, _shutdown) =
-                    Pipeline::new(batch_size as usize + 1024, Some(filter), vec![output]);
+                    Pipeline::new(batch_size as usize + 1024, filters, vec![output]);
 
                 let handle = tokio::spawn(async move {
                     let _ = pipeline.run().await;
@@ -115,7 +116,7 @@ fn bench_pipeline_fanout(c: &mut Criterion) {
                         .collect();
 
                     let (pipeline, ingress, _shutdown) =
-                        Pipeline::new(batch_size as usize + 1024, None, outputs);
+                        Pipeline::new(batch_size as usize + 1024, vec![], outputs);
 
                     let handle = tokio::spawn(async move {
                         let _ = pipeline.run().await;

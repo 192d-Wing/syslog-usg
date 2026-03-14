@@ -34,7 +34,7 @@ async fn udp_end_to_end() {
     // 1. Set up pipeline with a test output
     let output = ForwardOutput::new("test");
     let output_clone = output.clone();
-    let (pipeline, ingress, _shutdown) = Pipeline::new(64, None, vec![output]);
+    let (pipeline, ingress, _shutdown) = Pipeline::new(64, vec![], vec![output]);
 
     let pipeline_handle = tokio::spawn(async move {
         let _ = pipeline.run().await;
@@ -115,7 +115,7 @@ async fn tcp_end_to_end() {
     // 1. Set up pipeline with a test output
     let output = ForwardOutput::new("test");
     let output_clone = output.clone();
-    let (pipeline, ingress, _shutdown) = Pipeline::new(64, None, vec![output]);
+    let (pipeline, ingress, _shutdown) = Pipeline::new(64, vec![], vec![output]);
 
     let pipeline_handle = tokio::spawn(async move {
         let _ = pipeline.run().await;
@@ -205,7 +205,7 @@ async fn tcp_end_to_end() {
 async fn tcp_multiple_messages() {
     let output = ForwardOutput::new("test");
     let output_clone = output.clone();
-    let (pipeline, ingress, _shutdown) = Pipeline::new(64, None, vec![output]);
+    let (pipeline, ingress, _shutdown) = Pipeline::new(64, vec![], vec![output]);
 
     let pipeline_handle = tokio::spawn(async move {
         let _ = pipeline.run().await;
@@ -285,14 +285,15 @@ async fn tcp_multiple_messages() {
 #[tokio::test]
 async fn pipeline_filter_integration() {
     use syslog_proto::Severity;
-    use syslog_relay::SeverityFilter;
+    use syslog_relay::{MessageFilter, SeverityFilter};
 
     let output = ForwardOutput::new("test");
     let output_clone = output.clone();
 
     // Only pass Warning and above
     let filter = SeverityFilter::new(Severity::Warning);
-    let (pipeline, ingress, _shutdown) = Pipeline::new(64, Some(filter), vec![output]);
+    let filters: Vec<Box<dyn MessageFilter>> = vec![Box::new(filter)];
+    let (pipeline, ingress, _shutdown) = Pipeline::new(64, filters, vec![output]);
 
     let pipeline_handle = tokio::spawn(async move {
         let _ = pipeline.run().await;

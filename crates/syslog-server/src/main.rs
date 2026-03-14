@@ -4,6 +4,7 @@
 //! - Transport listeners (UDP, TCP/TLS)
 //! - Message parsing (RFC 5424, RFC 3164)
 //! - Relay pipeline (filter, route, fan-out)
+//! - Management state (RFC 9742 counters, features)
 //! - Observability (metrics, health endpoints, structured logging)
 //! - Configuration loading (TOML with env var substitution)
 
@@ -18,8 +19,12 @@ use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
 use syslog_config::model::{ListenerProtocol, OutputProtocol, ServerConfig};
+use syslog_mgmt::{SharedSyslogState, SyslogFeatures};
 use syslog_observe::{HealthState, LogReloadHandle, health_router, init_logging, init_metrics};
-use syslog_relay::{Pipeline, PipelineIngress};
+use syslog_relay::{
+    AlarmFilter, MessageFilter, NonAlarmPolicy, Pipeline, PipelineIngress, RoutingRule,
+    RoutingTable,
+};
 use syslog_transport::tcp::{TcpListenerConfig, TcpMessage, run_tcp_listener};
 use syslog_transport::udp::{UdpDatagram, UdpListenerConfig, run_udp_listener};
 
@@ -76,6 +81,11 @@ async fn main() {
         }
     };
 
+    // Detect features and build shared management state
+    let features = detect_features(&config);
+    let shared_state = SharedSyslogState::new(features);
+    info!(features = ?features.flag_names(), "detected features");
+
     // Shutdown coordination
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -86,7 +96,25 @@ async fn main() {
     }
     let channel_capacity = config.pipeline.channel_buffer_size;
 
-    let (pipeline, ingress, pipeline_shutdown) = Pipeline::new(channel_capacity, None, outputs);
+    // Build filter chain
+    let filters = build_filters(&config);
+
+    // Build optional signing/verification stages (RFC 5848)
+    let signing = build_signing_stage(&config);
+    let verification = build_verification_stage(&config);
+
+    // Build routing table from management actions
+    let routing_table = build_routing_table(&config, outputs.len());
+
+    let (pipeline, ingress, pipeline_shutdown) = Pipeline::with_management(
+        channel_capacity,
+        filters,
+        outputs,
+        signing,
+        verification,
+        routing_table,
+        Some(shared_state.clone()),
+    );
 
     // Start the relay pipeline
     let pipeline_handle = tokio::spawn(async move {
@@ -100,12 +128,13 @@ async fn main() {
     start_listeners(
         &config,
         &ingress,
+        &shared_state,
         shutdown_rx.clone(),
         &mut listener_handles,
     );
 
-    // Start health/metrics HTTP server
-    let health_state = HealthState::new(metrics_handle);
+    // Start health/metrics HTTP server (with management state)
+    let health_state = HealthState::with_management(metrics_handle, shared_state.clone());
     let health_addr: SocketAddr = config
         .metrics
         .bind_address
@@ -157,10 +186,113 @@ async fn main() {
     info!("syslog-usg stopped");
 }
 
+/// Detect which features are enabled based on configuration.
+fn detect_features(config: &ServerConfig) -> SyslogFeatures {
+    let mut features = SyslogFeatures::RFC5424_FORMAT | SyslogFeatures::RFC3164_FORMAT;
+
+    for listener in &config.listeners {
+        match listener.protocol {
+            ListenerProtocol::Udp => features |= SyslogFeatures::UDP_TRANSPORT,
+            ListenerProtocol::Tcp => features |= SyslogFeatures::TCP_TRANSPORT,
+            ListenerProtocol::Tls => features |= SyslogFeatures::TLS_TRANSPORT,
+            ListenerProtocol::Dtls => features |= SyslogFeatures::DTLS_TRANSPORT,
+        }
+    }
+
+    for output in &config.outputs {
+        match output.protocol {
+            OutputProtocol::Udp => features |= SyslogFeatures::UDP_TRANSPORT,
+            OutputProtocol::Tcp => features |= SyslogFeatures::TCP_TRANSPORT,
+            OutputProtocol::Tls => features |= SyslogFeatures::TLS_TRANSPORT,
+            OutputProtocol::Dtls => features |= SyslogFeatures::DTLS_TRANSPORT,
+        }
+    }
+
+    if !config.outputs.is_empty() {
+        features |= SyslogFeatures::RELAY;
+    }
+
+    if config.signing.as_ref().is_some_and(|s| s.enabled) {
+        features |= SyslogFeatures::SIGNING;
+    }
+
+    features |= SyslogFeatures::STRUCTURED_DATA;
+
+    if config
+        .pipeline
+        .alarm_filter
+        .as_ref()
+        .is_some_and(|af| af.enabled)
+    {
+        features |= SyslogFeatures::ALARM;
+    }
+
+    features
+}
+
+/// Build the routing table from management action configurations.
+fn build_routing_table(config: &ServerConfig, output_count: usize) -> Option<RoutingTable> {
+    if config.actions.is_empty() {
+        return None;
+    }
+
+    let mut rules = Vec::new();
+    for (i, action_cfg) in config.actions.iter().enumerate() {
+        let selector = match syslog_config::convert::convert_selector(&action_cfg.selector) {
+            Ok(s) => s,
+            Err(e) => {
+                error!(action_index = i, "failed to convert action selector: {e}");
+                continue;
+            }
+        };
+
+        // Map action type to output indices.
+        // For now, Remote actions map to all outputs (future: match by host/port).
+        // Console/Discard/File/Buffer actions don't route to network outputs.
+        let output_indices: Vec<usize> = match &action_cfg.action {
+            syslog_config::model::ActionTypeConfig::Remote { .. } => (0..output_count).collect(),
+            syslog_config::model::ActionTypeConfig::Console => {
+                // Console action: route to all outputs for now
+                (0..output_count).collect()
+            }
+            syslog_config::model::ActionTypeConfig::Discard => {
+                // Discard: route to no outputs (message will be dropped)
+                vec![]
+            }
+            syslog_config::model::ActionTypeConfig::File { .. }
+            | syslog_config::model::ActionTypeConfig::Buffer { .. } => {
+                // File/Buffer: not yet implemented as outputs
+                info!(
+                    action_index = i,
+                    "file/buffer action types are not yet network-routable"
+                );
+                continue;
+            }
+        };
+
+        rules.push(RoutingRule {
+            selector,
+            output_indices,
+            description: action_cfg.description.clone(),
+        });
+    }
+
+    if rules.is_empty() {
+        None
+    } else {
+        info!(
+            rules = rules.len(),
+            "routing table built from management actions"
+        );
+        Some(RoutingTable::new(rules))
+    }
+}
+
 /// Start transport listeners based on configuration.
 fn start_listeners(
     config: &ServerConfig,
     ingress: &PipelineIngress,
+    shared_state: &SharedSyslogState,
     shutdown_rx: watch::Receiver<bool>,
     handles: &mut Vec<tokio::task::JoinHandle<()>>,
 ) {
@@ -184,6 +316,7 @@ fn start_listeners(
                 let (udp_tx, mut udp_rx) = mpsc::channel::<UdpDatagram>(4096);
                 let shutdown = shutdown_rx.clone();
                 let ingress = ingress.clone();
+                let state = shared_state.clone();
 
                 // Spawn the UDP listener
                 handles.push(tokio::spawn(async move {
@@ -195,6 +328,7 @@ fn start_listeners(
                 // Spawn the parser bridge (UDP datagrams -> parsed messages -> pipeline)
                 handles.push(tokio::spawn(async move {
                     while let Some(datagram) = udp_rx.recv().await {
+                        state.counters().increment_received();
                         match syslog_parse::parse(&datagram.data) {
                             Ok(msg) => {
                                 if let Err(e) = ingress.send(msg).await {
@@ -203,6 +337,7 @@ fn start_listeners(
                                 }
                             }
                             Err(e) => {
+                                state.counters().increment_malformed();
                                 warn!(
                                     source = %datagram.source,
                                     "parse error: {e}"
@@ -259,6 +394,7 @@ fn start_listeners(
                 let (tcp_tx, mut tcp_rx) = mpsc::channel::<TcpMessage>(4096);
                 let shutdown = shutdown_rx.clone();
                 let ingress = ingress.clone();
+                let state = shared_state.clone();
 
                 // Spawn the TCP/TLS listener
                 handles.push(tokio::spawn(async move {
@@ -270,6 +406,7 @@ fn start_listeners(
                 // Spawn the parser bridge (TCP frames -> parsed messages -> pipeline)
                 handles.push(tokio::spawn(async move {
                     while let Some(frame) = tcp_rx.recv().await {
+                        state.counters().increment_received();
                         match syslog_parse::parse(&frame.data) {
                             Ok(msg) => {
                                 if let Err(e) = ingress.send(msg).await {
@@ -278,6 +415,7 @@ fn start_listeners(
                                 }
                             }
                             Err(e) => {
+                                state.counters().increment_malformed();
                                 warn!(
                                     source = %frame.peer,
                                     tls = frame.tls,
@@ -294,6 +432,99 @@ fn start_listeners(
             }
         }
     }
+}
+
+/// Build the pipeline filter chain from configuration.
+fn build_filters(config: &ServerConfig) -> Vec<Box<dyn MessageFilter>> {
+    let mut filters: Vec<Box<dyn MessageFilter>> = Vec::new();
+
+    // Build alarm filter if configured and enabled (RFC 5674).
+    if let Some(ref af_cfg) = config.pipeline.alarm_filter {
+        if af_cfg.enabled {
+            let mut builder = AlarmFilter::builder();
+
+            // Min severity
+            if let Some(ref sev_str) = af_cfg.min_severity {
+                if let Ok(sev) = sev_str.parse::<syslog_proto::PerceivedSeverity>() {
+                    builder = builder.min_severity(sev);
+                }
+            }
+
+            // Event types
+            let mut event_types = Vec::new();
+            for et_str in &af_cfg.event_types {
+                if let Ok(et) = et_str.parse::<syslog_proto::ItuEventType>() {
+                    event_types.push(et);
+                }
+            }
+            if !event_types.is_empty() {
+                builder = builder.event_types(event_types);
+            }
+
+            // Resource patterns
+            if !af_cfg.resource_patterns.is_empty() {
+                builder = builder.resource_patterns(af_cfg.resource_patterns.clone());
+            }
+
+            // Non-alarm policy
+            if let Some(ref policy_str) = af_cfg.non_alarm_policy {
+                let policy = match policy_str.as_str() {
+                    "drop" => NonAlarmPolicy::Drop,
+                    _ => NonAlarmPolicy::Pass,
+                };
+                builder = builder.non_alarm_policy(policy);
+            }
+
+            let alarm_filter = builder.build();
+            info!(
+                min_severity = ?af_cfg.min_severity,
+                event_types = ?af_cfg.event_types,
+                non_alarm_policy = ?af_cfg.non_alarm_policy,
+                "alarm filter enabled"
+            );
+            filters.push(Box::new(alarm_filter));
+        }
+    }
+
+    filters
+}
+
+/// Build the optional RFC 5848 signing stage from configuration.
+///
+/// Key loading from files is not yet implemented — this function logs
+/// the configuration and returns `None` for now.
+fn build_signing_stage(config: &ServerConfig) -> Option<syslog_relay::SigningStage> {
+    if let Some(ref signing_cfg) = config.signing {
+        if signing_cfg.enabled {
+            info!(
+                key_path = %signing_cfg.key_path,
+                cert_path = ?signing_cfg.cert_path,
+                hash_algorithm = ?signing_cfg.hash_algorithm,
+                signature_group = ?signing_cfg.signature_group,
+                "signing configured (key loading not yet implemented)"
+            );
+            // Future: load key from signing_cfg.key_path, build Signer + SigningStage
+        }
+    }
+    None
+}
+
+/// Build the optional RFC 5848 verification stage from configuration.
+///
+/// Key loading from files is not yet implemented — this function logs
+/// the configuration and returns `None` for now.
+fn build_verification_stage(config: &ServerConfig) -> Option<syslog_relay::VerificationStage> {
+    if let Some(ref verif_cfg) = config.verification {
+        if verif_cfg.enabled {
+            info!(
+                trusted_keys = verif_cfg.trusted_key_paths.len(),
+                reject_unverified = verif_cfg.reject_unverified,
+                "verification configured (key loading not yet implemented)"
+            );
+            // Future: load trusted keys, build VerificationStage
+        }
+    }
+    None
 }
 
 /// Build network outputs from configuration.

@@ -68,6 +68,27 @@ impl PerceivedSeverity {
         }
     }
 
+    /// Returns a numeric urgency rank for ordering purposes.
+    ///
+    /// Critical=5, Indeterminate=4, Major=3, Minor=2, Warning=1, Cleared=0.
+    #[must_use]
+    pub const fn urgency_rank(self) -> u8 {
+        match self {
+            Self::Cleared => 0,
+            Self::Warning => 1,
+            Self::Minor => 2,
+            Self::Major => 3,
+            Self::Indeterminate => 4,
+            Self::Critical => 5,
+        }
+    }
+
+    /// Returns `true` if this severity is at least as urgent as `threshold`.
+    #[must_use]
+    pub const fn is_at_least(self, threshold: Self) -> bool {
+        self.urgency_rank() >= threshold.urgency_rank()
+    }
+
     /// Maps to the recommended syslog `Severity` per RFC 5674 Table 1.
     ///
     /// Where RFC 5674 allows multiple syslog severities, this returns the
@@ -84,6 +105,18 @@ impl PerceivedSeverity {
             Self::Minor => Severity::Warning,
             Self::Warning => Severity::Notice,
         }
+    }
+}
+
+impl PartialOrd for PerceivedSeverity {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PerceivedSeverity {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.urgency_rank().cmp(&other.urgency_rank())
     }
 }
 
@@ -179,6 +212,25 @@ impl ItuEventType {
 impl core::fmt::Display for ItuEventType {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(self.as_itu_str())
+    }
+}
+
+impl core::str::FromStr for ItuEventType {
+    type Err = AlarmError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "other" => Ok(Self::Other),
+            "communicationsAlarm" => Ok(Self::CommunicationsAlarm),
+            "qualityOfServiceAlarm" => Ok(Self::QualityOfServiceAlarm),
+            "processingErrorAlarm" => Ok(Self::ProcessingErrorAlarm),
+            "equipmentAlarm" => Ok(Self::EquipmentAlarm),
+            "environmentalAlarm" => Ok(Self::EnvironmentalAlarm),
+            _ => Err(AlarmError::InvalidField {
+                field: PARAM_EVENT_TYPE,
+                reason: format!("unknown ITU event type name: {s:?}"),
+            }),
+        }
     }
 }
 
@@ -740,6 +792,74 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    // ── PerceivedSeverity ordering ─────────────────────────────────
+
+    #[test]
+    fn perceived_severity_urgency_rank() {
+        assert_eq!(PerceivedSeverity::Cleared.urgency_rank(), 0);
+        assert_eq!(PerceivedSeverity::Warning.urgency_rank(), 1);
+        assert_eq!(PerceivedSeverity::Minor.urgency_rank(), 2);
+        assert_eq!(PerceivedSeverity::Major.urgency_rank(), 3);
+        assert_eq!(PerceivedSeverity::Indeterminate.urgency_rank(), 4);
+        assert_eq!(PerceivedSeverity::Critical.urgency_rank(), 5);
+    }
+
+    #[test]
+    fn perceived_severity_is_at_least() {
+        assert!(PerceivedSeverity::Critical.is_at_least(PerceivedSeverity::Warning));
+        assert!(PerceivedSeverity::Major.is_at_least(PerceivedSeverity::Major));
+        assert!(!PerceivedSeverity::Warning.is_at_least(PerceivedSeverity::Major));
+        assert!(PerceivedSeverity::Cleared.is_at_least(PerceivedSeverity::Cleared));
+        assert!(!PerceivedSeverity::Cleared.is_at_least(PerceivedSeverity::Warning));
+    }
+
+    #[test]
+    fn perceived_severity_ord() {
+        assert!(PerceivedSeverity::Critical > PerceivedSeverity::Major);
+        assert!(PerceivedSeverity::Major > PerceivedSeverity::Minor);
+        assert!(PerceivedSeverity::Minor > PerceivedSeverity::Warning);
+        assert!(PerceivedSeverity::Warning > PerceivedSeverity::Cleared);
+        assert!(PerceivedSeverity::Indeterminate > PerceivedSeverity::Major);
+        assert!(PerceivedSeverity::Critical > PerceivedSeverity::Indeterminate);
+    }
+
+    // ── ItuEventType FromStr ────────────────────────────────────────
+
+    #[test]
+    fn itu_event_type_from_str_roundtrip() {
+        let variants = [
+            ItuEventType::Other,
+            ItuEventType::CommunicationsAlarm,
+            ItuEventType::QualityOfServiceAlarm,
+            ItuEventType::ProcessingErrorAlarm,
+            ItuEventType::EquipmentAlarm,
+            ItuEventType::EnvironmentalAlarm,
+        ];
+        for v in &variants {
+            let s = v.as_itu_str();
+            let parsed = s.parse::<ItuEventType>();
+            assert!(parsed.is_ok(), "failed to parse {s:?}");
+            if let Ok(p) = parsed {
+                assert_eq!(p, *v);
+            }
+        }
+    }
+
+    #[test]
+    fn itu_event_type_from_str_invalid() {
+        assert!("bogus".parse::<ItuEventType>().is_err());
+        assert!("Communications".parse::<ItuEventType>().is_err());
+    }
+
+    #[test]
+    fn perceived_severity_partial_ord_consistent() {
+        // Verify PartialOrd and Ord are consistent
+        let a = PerceivedSeverity::Major;
+        let b = PerceivedSeverity::Minor;
+        assert_eq!(a.partial_cmp(&b), Some(core::cmp::Ordering::Greater));
+        assert_eq!(a.cmp(&b), core::cmp::Ordering::Greater);
     }
 
     #[test]
