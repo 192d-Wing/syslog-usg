@@ -11,6 +11,9 @@ workspace = true
 
 [dependencies]
 syslog-proto = { workspace = true }
+syslog-parse = { workspace = true }
+syslog-sign = { workspace = true }
+syslog-mgmt = { workspace = true }
 bytes = { workspace = true }
 compact_str = { workspace = true }
 smallvec = { workspace = true }

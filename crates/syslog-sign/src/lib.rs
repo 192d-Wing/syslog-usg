@@ -42,6 +42,7 @@ pub mod counter;
 pub mod encode;
 pub mod error;
 pub mod hash;
+pub mod prepare;
 pub mod signature;
 pub mod signer;
 pub mod types;
