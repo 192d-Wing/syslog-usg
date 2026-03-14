@@ -13,7 +13,14 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
+use axum::{
+    Router,
+    extract::{Request, State},
+    http::StatusCode,
+    middleware::{self, Next},
+    response::IntoResponse,
+    routing::get,
+};
 use metrics_exporter_prometheus::PrometheusHandle;
 use syslog_mgmt::SharedSyslogState;
 
@@ -77,21 +84,65 @@ impl HealthState {
 
 /// Build an [`axum::Router`] with `/healthz`, `/readyz`, `/metrics`,
 /// and optionally `/management/*` endpoints.
+///
+/// If `bearer_token` is `Some`, the `/metrics` and `/management/*` routes
+/// require an `Authorization: Bearer <token>` header. Health probes
+/// (`/healthz`, `/readyz`) remain unauthenticated for load-balancer use.
 pub fn health_router(state: HealthState) -> Router {
-    let mut router = Router::new()
+    health_router_with_token(state, None)
+}
+
+/// Build the health router with optional bearer-token authentication.
+///
+/// When `bearer_token` is `Some`, `/metrics` and `/management/*` routes
+/// require a matching `Authorization: Bearer <token>` header (401 on
+/// mismatch). `/healthz` and `/readyz` are always unauthenticated.
+pub fn health_router_with_token(state: HealthState, bearer_token: Option<String>) -> Router {
+    // Unauthenticated routes (health probes for load balancers).
+    let public_routes = Router::new()
         .route("/healthz", get(healthz))
-        .route("/readyz", get(readyz))
-        .route("/metrics", get(metrics_handler));
+        .route("/readyz", get(readyz));
+
+    // Protected routes: metrics + management.
+    let mut protected = Router::new().route("/metrics", get(metrics_handler));
 
     // Add management endpoints if management state is available.
     if state.mgmt_state.is_some() {
-        router = router
+        protected = protected
             .route("/management/state", get(mgmt_state_handler))
             .route("/management/features", get(mgmt_features_handler))
             .route("/management/counters", get(mgmt_counters_handler));
     }
 
-    router.with_state(state)
+    // Apply bearer-token middleware to protected routes when configured.
+    let protected = if let Some(token) = bearer_token {
+        let expected = Arc::new(token);
+        protected.layer(middleware::from_fn(move |req, next| {
+            let expected = Arc::clone(&expected);
+            bearer_auth(expected, req, next)
+        }))
+    } else {
+        protected
+    };
+
+    public_routes.merge(protected).with_state(state)
+}
+
+/// Middleware that validates the `Authorization: Bearer <token>` header.
+async fn bearer_auth(expected_token: Arc<String>, req: Request, next: Next) -> impl IntoResponse {
+    let auth_header = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok());
+
+    let mut expected_value = String::with_capacity(7 + expected_token.len());
+    expected_value.push_str("Bearer ");
+    expected_value.push_str(&expected_token);
+
+    match auth_header {
+        Some(value) if value == expected_value => next.run(req).await.into_response(),
+        _ => StatusCode::UNAUTHORIZED.into_response(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -459,5 +510,77 @@ mod tests {
             Err(_) => return,
         };
         assert_eq!(body_str, "[]");
+    }
+
+    // -- Bearer-token authentication tests --
+
+    /// Helper: build a test app with bearer-token authentication enabled.
+    fn test_app_with_token(token: &str) -> Router {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        drop(recorder);
+
+        let state = HealthState::new(handle);
+        state.set_ready(true);
+        health_router_with_token(state, Some(token.to_owned()))
+    }
+
+    /// Helper: build a test request with an Authorization header.
+    fn test_request_with_auth(uri: &str, token: &str) -> Request<Body> {
+        let mut bearer = String::with_capacity(7 + token.len());
+        bearer.push_str("Bearer ");
+        bearer.push_str(token);
+        Request::builder()
+            .uri(uri)
+            .header("authorization", bearer)
+            .body(Body::empty())
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn metrics_returns_401_without_token() {
+        let app = test_app_with_token("secret-token-123");
+        let response = app.oneshot(test_request("/metrics")).await;
+        let resp = match response {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "expected 401 Unauthorized from /metrics without bearer token"
+        );
+    }
+
+    #[tokio::test]
+    async fn metrics_returns_200_with_correct_token() {
+        let app = test_app_with_token("secret-token-123");
+        let response = app
+            .oneshot(test_request_with_auth("/metrics", "secret-token-123"))
+            .await;
+        let resp = match response {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "expected 200 OK from /metrics with correct bearer token"
+        );
+    }
+
+    #[tokio::test]
+    async fn healthz_accessible_without_token_when_auth_enabled() {
+        let app = test_app_with_token("secret-token-123");
+        let response = app.oneshot(test_request("/healthz")).await;
+        let resp = match response {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "expected 200 OK from /healthz without bearer token (unauthenticated probe)"
+        );
     }
 }

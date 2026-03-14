@@ -8,6 +8,6 @@ pub mod logging;
 pub mod metrics;
 
 // Re-export the primary entry points for convenience.
-pub use health::{HealthState, health_router};
+pub use health::{HealthState, health_router, health_router_with_token};
 pub use logging::{LogReloadHandle, init_logging};
 pub use metrics::init_metrics;

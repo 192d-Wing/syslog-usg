@@ -331,6 +331,12 @@ pub struct MetricsConfig {
     /// Bind address for the Prometheus HTTP endpoint.
     #[serde(default = "default_metrics_bind")]
     pub bind_address: String,
+
+    /// Optional bearer token for authenticating `/metrics` and `/management/*`
+    /// endpoints. When set, requests must include an `Authorization: Bearer <token>`
+    /// header. Health probes (`/healthz`, `/readyz`) remain unauthenticated.
+    #[serde(default)]
+    pub bearer_token: Option<String>,
 }
 
 impl Default for MetricsConfig {
@@ -338,6 +344,7 @@ impl Default for MetricsConfig {
         Self {
             enabled: false,
             bind_address: default_metrics_bind(),
+            bearer_token: None,
         }
     }
 }

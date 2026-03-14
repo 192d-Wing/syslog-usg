@@ -76,9 +76,7 @@ pub async fn run_tcp_listener(
     let is_tls = tls_acceptor.is_some();
 
     // F-02: connection limit semaphore
-    let semaphore = config
-        .max_connections
-        .map(|n| Arc::new(Semaphore::new(n)));
+    let semaphore = config.max_connections.map(|n| Arc::new(Semaphore::new(n)));
 
     // Effective read timeout: explicit read_timeout takes precedence, then idle_timeout.
     let effective_timeout = config.read_timeout.or(config.idle_timeout);
@@ -325,8 +323,7 @@ mod tests {
         // socket, so any data sent will never produce a TcpMessage.
         if let Ok(mut c2) = tokio::net::TcpStream::connect(addr).await {
             let _ = c2.write_all(b"5 world").await;
-            let received2 =
-                tokio::time::timeout(Duration::from_millis(300), rx.recv()).await;
+            let received2 = tokio::time::timeout(Duration::from_millis(300), rx.recv()).await;
             assert!(
                 received2.is_err(),
                 "second connection should be rejected at the limit"
