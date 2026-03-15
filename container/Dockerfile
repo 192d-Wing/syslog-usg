@@ -67,7 +67,7 @@ FROM gcr.io/distroless/static-debian12:nonroot
 
 LABEL org.opencontainers.image.title="syslog-usg"
 LABEL org.opencontainers.image.description="Production-grade RFC-compliant syslog server and relay"
-LABEL org.opencontainers.image.source="https://github.com/syslog-usg/syslog-usg"
+LABEL org.opencontainers.image.source="https://github.com/192d-Wing/syslog-usg"
 
 # Copy binary
 COPY --from=builder /build/target/release/syslog-usg /usr/local/bin/syslog-usg

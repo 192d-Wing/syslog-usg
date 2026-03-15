@@ -537,6 +537,7 @@ syslog-server (anyhow::Error)
 ```
 
 Key rules:
+
 - **Parse errors do not crash the pipeline.** A malformed message is logged at `warn` level, counted in `syslog_parse_errors_total`, and dropped. The listener continues processing.
 - **Output errors trigger retry with backoff.** The relay queue buffers messages during transient output failures. Persistent failures are logged and metered.
 - **Config errors are fail-fast at startup.** All validation errors are collected and reported together, then the process exits with code 1.
@@ -933,6 +934,7 @@ format = "json"
 The config loader supports `${VAR}` and `${VAR:-default}` syntax in all string values. Substitution occurs before TOML parsing, operating on the raw file text.
 
 Rules:
+
 - `${VAR}` — replaced by the value of environment variable `VAR`. Error if unset.
 - `${VAR:-fallback}` — replaced by `VAR` if set, otherwise `fallback`.
 - Nested substitution is not supported.
@@ -997,6 +999,7 @@ let (output_tx, output_rx) = tokio::sync::mpsc::channel::<Arc<SyslogMessage>>(qu
 ```
 
 Design decisions:
+
 - **Bounded everywhere.** No `unbounded_channel` calls in the entire codebase. Capacities are configurable.
 - **`mpsc` for fan-in** (multiple listeners -> one router). Each listener clones `ingest_tx`.
 - **Dedicated channel per output** for isolation. One slow output does not block others.
@@ -1036,6 +1039,7 @@ shutdown.cancel();
 ```
 
 Shutdown sequence:
+
 1. Signal handler calls `shutdown.cancel()`.
 2. Listener tasks stop accepting new connections/datagrams.
 3. Existing TLS/TCP connection tasks drain their read buffers, then close.
@@ -1056,6 +1060,7 @@ Output slow -> output channel fills -> router blocks on send (or drops per polic
 ```
 
 Per-output backpressure policies:
+
 - **`drop_newest`** — `try_send()` on the output channel; if full, drop the current message and increment `syslog_messages_dropped_total{reason="queue_full"}`.
 - **`drop_oldest`** — Not directly supported by `mpsc`. Implemented with a wrapper: when `try_send()` fails, `try_recv()` one message (discard it), then `send()` the new one.
 - **`block`** — `send().await` on the output channel. This blocks the router, which eventually blocks listeners. Use with caution; appropriate for file outputs where temporary disk latency should not cause drops.
@@ -1373,6 +1378,7 @@ pub fn parse_rfc5424(input: Bytes) -> Result<SyslogMessage, ParseError> {
 ```
 
 When copies are necessary:
+
 - **Timestamp parsing**: The timestamp string is parsed into `time::OffsetDateTime`, which is a stack-allocated struct. The string itself is not retained.
 - **SD-PARAM unescaping**: If an SD-PARAM value contains escape sequences (`\"`, `\\`, `\]`), the unescaped value must be a new allocation. In the common case (no escapes), the `Bytes` slice is used directly.
 - **RFC 3164 translation**: Legacy messages may require constructing synthetic fields (e.g., generating a hostname from the source IP), which allocates.
@@ -1380,17 +1386,20 @@ When copies are necessary:
 ### 8.4 Buffer Sizing and Pooling
 
 **UDP receive buffers:**
+
 - Pre-allocate a `BytesMut` with capacity matching the configured `max_message_size` (default 8192).
 - After parsing, `BytesMut::split()` freezes the used portion into `Bytes` (zero-copy).
 - The `BytesMut` is then reused for the next recv (remaining capacity).
 - If remaining capacity is less than `max_message_size`, allocate a new `BytesMut`.
 
 **TCP/TLS read buffers:**
+
 - Each connection has a `BytesMut` read buffer sized to 64 KiB.
 - The octet-counting framer reads frames from this buffer.
 - `BytesMut` is reused across frames within the same connection.
 
 **Output write buffers:**
+
 - Each output worker has a `BytesMut` write buffer.
 - For passthrough forwarding (same format), the serializer writes `raw` directly.
 - For format conversion (e.g., to JSON), the serializer writes into a `String` buffer.
@@ -1423,6 +1432,7 @@ pub struct SdParam {
 For the MVP, explicit arena or pool allocation is not used. The combination of `Bytes` (reference-counted, zero-copy slicing) and `SmallVec` (stack allocation for small collections) achieves the performance targets without the complexity of custom allocators.
 
 If profiling reveals allocation pressure under extreme load (>200k msg/sec), the following can be introduced later without API changes:
+
 - **`BytesMut` pool**: A `crossbeam` or `flurry` pool of pre-allocated `BytesMut` buffers for UDP receive. Reduces allocator contention under high message rates.
 - **`SyslogMessage` object pool**: Reuse parsed message structs via a channel-based pool. The `Bytes` slices inside would still reference the original network buffers.
 
@@ -1617,7 +1627,7 @@ members = [
 edition = "2024"
 rust-version = "1.92"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/example/syslog-usg"
+repository = "https://github.com/192d-Wing/syslog-usg"
 
 [workspace.dependencies]
 # Internal crates
@@ -1882,4 +1892,3 @@ harness = false
 name = "pipeline"
 harness = false
 ```
-

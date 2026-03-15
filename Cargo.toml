@@ -19,7 +19,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
-repository = "https://github.com/syslog-usg/syslog-usg"
+repository = "https://github.com/192d-Wing/syslog-usg"
 
 [workspace.dependencies]
 # Internal crates
@@ -39,7 +39,11 @@ tokio-stream = "0.1"
 
 # TLS
 tokio-rustls = "0.26"
-rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
+rustls = { version = "0.23", default-features = false, features = [
+    "std",
+    "tls12",
+    "ring",
+] }
 webpki-roots = "1"
 
 # Buffers

@@ -1,6 +1,6 @@
 [Unit]
 Description=syslog-usg — Production-grade syslog server and relay
-Documentation=https://github.com/syslog-usg/syslog-usg
+Documentation=https://github.com/192d-Wing/syslog-usg
 After=network-online.target
 Wants=network-online.target
 
