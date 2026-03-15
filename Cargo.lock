@@ -1684,6 +1684,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]
@@ -1720,6 +1721,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "compact_str",
+ "libc",
  "metrics",
  "smallvec",
  "syslog-mgmt",

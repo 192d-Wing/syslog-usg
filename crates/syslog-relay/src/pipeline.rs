@@ -171,6 +171,10 @@ impl<O: Output> Pipeline<O> {
     }
 
     /// Send a message to all outputs (fan-out mode).
+    ///
+    /// Sends are sequential per output. If head-of-line blocking from a slow
+    /// output becomes an issue, consider isolating outputs behind per-output
+    /// bounded channels with dedicated send tasks.
     async fn send_to_all_outputs(&self, messages: &[SyslogMessage]) {
         for out_msg in messages {
             for output in &self.outputs {

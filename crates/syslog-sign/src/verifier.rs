@@ -215,9 +215,18 @@ impl ReplayDetector {
             }
         }
 
-        // Evict oldest session if at capacity (simple strategy: clear all)
+        // Evict the session with the lowest GBC when at capacity (LRU-like).
+        // This prevents an attacker from flushing ALL replay state by flooding
+        // with many distinct RSIDs.
         if self.seen.len() >= self.max_sessions && !self.seen.contains_key(&block.rsid) {
-            self.seen.clear();
+            if let Some((&evict_rsid, _)) = self.seen.iter().min_by_key(|(_, gbc)| **gbc) {
+                tracing::warn!(
+                    evicted_rsid = evict_rsid,
+                    table_size = self.seen.len(),
+                    "replay detector at capacity, evicting session with lowest GBC"
+                );
+                self.seen.remove(&evict_rsid);
+            }
         }
 
         let _prev = self.seen.insert(block.rsid, block.gbc);

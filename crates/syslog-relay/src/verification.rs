@@ -136,7 +136,8 @@ impl VerificationStage {
                 }
             }
             Err(_) => {
-                warn!("replay detector mutex poisoned, accepting message");
+                warn!("replay detector mutex poisoned, rejecting message for safety");
+                return VerificationResult::Reject;
             }
         }
 

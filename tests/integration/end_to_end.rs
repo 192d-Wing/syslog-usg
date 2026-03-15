@@ -582,19 +582,16 @@ async fn severity_filter_drops_debug_messages() {
             .expect("parse notice");
 
     // PRI <15> = User(1).Debug(7) — should be filtered
-    let debug_msg =
-        syslog_parse::parse(b"<15>1 2023-10-11T22:14:16Z host app - - - debug message")
-            .expect("parse debug");
+    let debug_msg = syslog_parse::parse(b"<15>1 2023-10-11T22:14:16Z host app - - - debug message")
+        .expect("parse debug");
 
     // PRI <14> = User(1).Info(6) — should be filtered (Info > Notice numerically)
-    let info_msg =
-        syslog_parse::parse(b"<14>1 2023-10-11T22:14:17Z host app - - - info message")
-            .expect("parse info");
+    let info_msg = syslog_parse::parse(b"<14>1 2023-10-11T22:14:17Z host app - - - info message")
+        .expect("parse info");
 
     // PRI <11> = User(1).Error(3) — should pass
-    let error_msg =
-        syslog_parse::parse(b"<11>1 2023-10-11T22:14:18Z host app - - - error message")
-            .expect("parse error");
+    let error_msg = syslog_parse::parse(b"<11>1 2023-10-11T22:14:18Z host app - - - error message")
+        .expect("parse error");
 
     ingress.send(notice_msg).await.expect("send notice");
     ingress.send(debug_msg).await.expect("send debug");

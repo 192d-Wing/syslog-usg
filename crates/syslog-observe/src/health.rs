@@ -8,10 +8,13 @@
 //! - `GET /management/features` — JSON array of feature flag names
 //! - `GET /management/counters` — JSON with counter values
 
+use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::Instant;
 
 use axum::{
     Router,
@@ -115,11 +118,14 @@ pub fn health_router_with_token(state: HealthState, bearer_token: Option<String>
     }
 
     // Apply bearer-token middleware to protected routes when configured.
+    // The token is wrapped in Zeroizing to ensure it's zeroed on drop.
     let protected = if let Some(token) = bearer_token {
-        let expected = Arc::new(token);
+        let expected = Arc::new(zeroize::Zeroizing::new(token));
+        let rate_limiter = AuthRateLimiter::new();
         protected.layer(middleware::from_fn(move |req, next| {
             let expected = Arc::clone(&expected);
-            bearer_auth(expected, req, next)
+            let rl = rate_limiter.clone();
+            bearer_auth(expected, rl, req, next)
         }))
     } else {
         protected
@@ -128,21 +134,98 @@ pub fn health_router_with_token(state: HealthState, bearer_token: Option<String>
     public_routes.merge(protected).with_state(state)
 }
 
+/// Per-IP failure tracker for rate-limiting auth brute-force attempts.
+#[derive(Clone)]
+struct AuthRateLimiter {
+    /// Maps IP → (failure_count, first_failure_time).
+    failures: Arc<Mutex<HashMap<IpAddr, (u32, Instant)>>>,
+}
+
+/// Maximum auth failures per IP within the window before returning 429.
+const AUTH_FAIL_LIMIT: u32 = 10;
+/// Window in seconds during which failures are counted.
+const AUTH_FAIL_WINDOW_SECS: u64 = 60;
+/// Maximum number of tracked IPs in the rate limiter.
+const AUTH_RATE_LIMIT_MAX_IPS: usize = 10_000;
+
+impl AuthRateLimiter {
+    fn new() -> Self {
+        Self {
+            failures: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Returns true if the IP is currently rate-limited.
+    fn is_limited(&self, ip: IpAddr) -> bool {
+        if let Ok(map) = self.failures.lock() {
+            if let Some(&(count, first_time)) = map.get(&ip) {
+                if first_time.elapsed().as_secs() < AUTH_FAIL_WINDOW_SECS {
+                    return count >= AUTH_FAIL_LIMIT;
+                }
+            }
+        }
+        false
+    }
+
+    /// Record an auth failure for the given IP.
+    fn record_failure(&self, ip: IpAddr) {
+        if let Ok(mut map) = self.failures.lock() {
+            // Cap tracked IPs to prevent OOM
+            if map.len() >= AUTH_RATE_LIMIT_MAX_IPS && !map.contains_key(&ip) {
+                // Evict expired entries
+                let now_secs = AUTH_FAIL_WINDOW_SECS;
+                map.retain(|_, (_, first_time)| first_time.elapsed().as_secs() < now_secs);
+                if map.len() >= AUTH_RATE_LIMIT_MAX_IPS {
+                    return; // Still full — ignore
+                }
+            }
+            let entry = map.entry(ip).or_insert((0, Instant::now()));
+            if entry.1.elapsed().as_secs() >= AUTH_FAIL_WINDOW_SECS {
+                // Reset window
+                *entry = (1, Instant::now());
+            } else {
+                entry.0 = entry.0.saturating_add(1);
+            }
+        }
+    }
+}
+
 /// Middleware that validates the `Authorization: Bearer <token>` header.
 ///
 /// Uses constant-time comparison to prevent timing side-channel attacks
 /// that could allow an attacker to progressively determine the token.
-async fn bearer_auth(expected_token: Arc<String>, req: Request, next: Next) -> impl IntoResponse {
+/// Rate-limits IPs that exceed [`AUTH_FAIL_LIMIT`] failures within
+/// [`AUTH_FAIL_WINDOW_SECS`] seconds.
+async fn bearer_auth(
+    expected_token: Arc<zeroize::Zeroizing<String>>,
+    rate_limiter: AuthRateLimiter,
+    req: Request,
+    next: Next,
+) -> impl IntoResponse {
     use subtle::ConstantTimeEq;
+
+    // Extract peer IP from the connection info for rate limiting.
+    let peer_ip = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0.ip());
+
+    // Check rate limit before doing any work
+    if let Some(ip) = peer_ip {
+        if rate_limiter.is_limited(ip) {
+            return StatusCode::TOO_MANY_REQUESTS.into_response();
+        }
+    }
 
     let auth_header = req
         .headers()
         .get("authorization")
         .and_then(|v| v.to_str().ok());
 
-    let mut expected_value = String::with_capacity(7 + expected_token.len());
+    let token_ref: &str = &expected_token;
+    let mut expected_value = String::with_capacity(7 + token_ref.len());
     expected_value.push_str("Bearer ");
-    expected_value.push_str(&expected_token);
+    expected_value.push_str(token_ref);
 
     match auth_header {
         Some(value)
@@ -151,7 +234,12 @@ async fn bearer_auth(expected_token: Arc<String>, req: Request, next: Next) -> i
         {
             next.run(req).await.into_response()
         }
-        _ => StatusCode::UNAUTHORIZED.into_response(),
+        _ => {
+            if let Some(ip) = peer_ip {
+                rate_limiter.record_failure(ip);
+            }
+            StatusCode::UNAUTHORIZED.into_response()
+        }
     }
 }
 

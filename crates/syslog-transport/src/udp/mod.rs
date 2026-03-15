@@ -17,6 +17,10 @@ use tracing::{debug, error, info, warn};
 /// Default SO_RCVBUF size: 2 MiB.
 const DEFAULT_RECV_BUF_SIZE: usize = 2 * 1024 * 1024;
 
+/// Maximum number of unique source IPs tracked for rate limiting.
+/// Prevents unbounded HashMap growth from spoofed source addresses.
+const MAX_TRACKED_SOURCES: usize = 100_000;
+
 /// Configuration for a UDP syslog listener.
 #[derive(Debug, Clone)]
 pub struct UdpListenerConfig {
@@ -113,6 +117,16 @@ pub async fn run_udp_listener(
     loop {
         // Reset rate-limit window periodically
         if rate_limit > 0 && window_start.elapsed().as_secs() >= RATE_WINDOW_SECS {
+            source_counts.clear();
+            window_start = std::time::Instant::now();
+        }
+
+        // Cap source tracking table to prevent OOM from spoofed source IPs
+        if rate_limit > 0 && source_counts.len() >= MAX_TRACKED_SOURCES {
+            warn!(
+                max = MAX_TRACKED_SOURCES,
+                "per-source rate-limit table full, resetting (possible spoofed-IP flood)"
+            );
             source_counts.clear();
             window_start = std::time::Instant::now();
         }

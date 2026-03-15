@@ -110,10 +110,16 @@ fn resolve_var_expr(expr: &str) -> Result<String, ConfigError> {
 // Validation
 // ---------------------------------------------------------------------------
 
-/// Check that a file path does not contain directory traversal sequences.
+/// Check that a file path does not contain directory traversal sequences
+/// or null bytes.
 fn validate_path(path: &str, context: &str) -> Result<(), ConfigError> {
     if path.is_empty() {
         return Err(ConfigError::MissingField(context.to_owned()));
+    }
+    if path.contains('\0') {
+        return Err(ConfigError::Validation(format!(
+            "{context}: path must not contain null bytes"
+        )));
     }
     if path.contains("..") {
         return Err(ConfigError::Validation(format!(
@@ -121,6 +127,23 @@ fn validate_path(path: &str, context: &str) -> Result<(), ConfigError> {
         )));
     }
     Ok(())
+}
+
+/// Maximum compiled NFA size for regex patterns (1 MiB), preventing ReDoS
+/// from catastrophic-backtracking patterns.
+const MAX_REGEX_SIZE: usize = 1024 * 1024;
+
+/// Validate and compile a regex pattern with a size limit to prevent ReDoS.
+fn validate_regex(pattern: &str, context: &str) -> Result<(), ConfigError> {
+    match regex::RegexBuilder::new(pattern)
+        .size_limit(MAX_REGEX_SIZE)
+        .build()
+    {
+        Ok(_) => Ok(()),
+        Err(e) => Err(ConfigError::Validation(format!(
+            "{context}: invalid or too-complex regex {pattern:?}: {e}"
+        ))),
+    }
 }
 
 /// Validate a parsed [`ServerConfig`].
@@ -288,18 +311,10 @@ fn validate(config: &ServerConfig) -> Result<(), ConfigError> {
         }
         // Validate hostname/app_name patterns compile.
         if let Some(ref pat) = action.selector.hostname_pattern {
-            if regex::Regex::new(pat).is_err() {
-                return Err(ConfigError::Validation(format!(
-                    "actions[{i}].selector.hostname_pattern: invalid regex {pat:?}"
-                )));
-            }
+            validate_regex(pat, &format!("actions[{i}].selector.hostname_pattern"))?;
         }
         if let Some(ref pat) = action.selector.app_name_pattern {
-            if regex::Regex::new(pat).is_err() {
-                return Err(ConfigError::Validation(format!(
-                    "actions[{i}].selector.app_name_pattern: invalid regex {pat:?}"
-                )));
-            }
+            validate_regex(pat, &format!("actions[{i}].selector.app_name_pattern"))?;
         }
         // Validate action type specifics.
         match &action.action {

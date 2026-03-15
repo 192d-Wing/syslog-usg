@@ -192,19 +192,20 @@ async fn main() {
         Err(e) => {
             error!(
                 address = %config.metrics.bind_address,
-                "invalid metrics bind address: {e} — defaulting to 127.0.0.1:9090"
+                "invalid metrics bind address: {e} — refusing to start with invalid address"
             );
-            ([127, 0, 0, 1], 9090).into()
+            std::process::exit(1);
         }
     };
 
-    // Warn if management/metrics endpoints are unauthenticated on non-loopback
+    // Refuse to bind metrics/management endpoints on non-loopback without auth
     if config.metrics.bearer_token.is_none() && !health_addr.ip().is_loopback() {
-        warn!(
+        error!(
             addr = %health_addr,
-            "metrics/management endpoints are unauthenticated on a non-loopback address — \
-             set metrics.bearer_token in config for production use"
+            "metrics/management endpoints MUST be authenticated on a non-loopback address — \
+             set metrics.bearer_token in config, or bind to a loopback address"
         );
+        std::process::exit(1);
     }
 
     let health_state_clone = health_state.clone();
@@ -258,9 +259,11 @@ async fn main() {
             }
         };
         if let Some(data) = state {
-            match std::fs::write(path, &data) {
+            match write_restricted_file(std::path::Path::new(path), data.as_bytes()) {
                 Ok(()) => info!(path = %path, "persisted replay detector state"),
-                Err(e) => error!(path = %path, error = %e, "failed to persist replay detector state"),
+                Err(e) => {
+                    error!(path = %path, error = %e, "failed to persist replay detector state")
+                }
             }
         }
     }
@@ -888,7 +891,7 @@ fn load_or_increment_rsid(state_dir: &str) -> syslog_sign::counter::RebootSessio
     }
 
     // Atomic write: write to tmp, then rename
-    if let Err(e) = std::fs::write(&tmp_path, next.to_string()) {
+    if let Err(e) = write_restricted_file(&tmp_path, next.to_string().as_bytes()) {
         warn!(path = %tmp_path.display(), "failed to write RSID tmp file: {e} — using unpersisted RSID");
         return RebootSessionId::unpersisted();
     }
@@ -952,6 +955,30 @@ fn check_key_file_permissions(path: &str) {
     #[cfg(not(unix))]
     {
         let _ = path;
+    }
+}
+
+/// Write data to a file with restrictive permissions (0600 on Unix).
+///
+/// This ensures state files (replay detector, RSID) are not world-readable.
+fn write_restricted_file(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(data)
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, data)
     }
 }
 

@@ -18,6 +18,10 @@ use tracing::{debug, error, info, warn};
 
 use crate::framing::OctetCountingCodec;
 
+/// Maximum number of unique source IPs tracked for per-IP connection limiting.
+/// Prevents unbounded HashMap growth from connections with diverse source IPs.
+const MAX_TRACKED_IPS: usize = 100_000;
+
 /// A framed syslog message received over TCP/TLS.
 #[derive(Debug, Clone)]
 pub struct TcpMessage {
@@ -144,6 +148,18 @@ pub async fn run_tcp_listener(
                         let per_ip_guard = if let Some(max_per_ip) = config.max_connections_per_ip {
                             match per_ip_counts.lock() {
                                 Ok(mut counts) => {
+                                    // Cap tracking table to prevent OOM from diverse source IPs.
+                                    // Entries are cleaned on disconnect via PerIpGuard drop, but
+                                    // half-open connections could still grow the table.
+                                    if counts.len() >= MAX_TRACKED_IPS && !counts.contains_key(&peer.ip()) {
+                                        warn!(
+                                            peer = %peer,
+                                            max = MAX_TRACKED_IPS,
+                                            "per-IP tracking table full, rejecting new connection"
+                                        );
+                                        drop(stream);
+                                        continue;
+                                    }
                                     let count = counts.entry(peer.ip()).or_insert(0);
                                     if *count >= max_per_ip {
                                         warn!(
@@ -497,8 +513,7 @@ mod tests {
 
         if let Ok(mut c3) = tokio::net::TcpStream::connect(addr).await {
             if c3.write_all(b"5 after").await.is_ok() {
-                let received3 =
-                    tokio::time::timeout(Duration::from_secs(2), rx.recv()).await;
+                let received3 = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await;
                 assert!(
                     matches!(received3, Ok(Some(_))),
                     "connection after previous close should be accepted"

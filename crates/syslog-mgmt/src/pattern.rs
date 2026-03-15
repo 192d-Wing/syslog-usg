@@ -16,8 +16,13 @@ impl Pattern {
     /// # Errors
     ///
     /// Returns [`MgmtError::RegexError`] if the pattern is not valid regex.
+    /// Maximum compiled NFA size (1 MiB) to prevent ReDoS.
+    const MAX_REGEX_SIZE: usize = 1024 * 1024;
+
     pub fn new(pattern: &str) -> Result<Self, MgmtError> {
-        let regex = regex::Regex::new(pattern)?;
+        let regex = regex::RegexBuilder::new(pattern)
+            .size_limit(Self::MAX_REGEX_SIZE)
+            .build()?;
         Ok(Self { regex })
     }
 

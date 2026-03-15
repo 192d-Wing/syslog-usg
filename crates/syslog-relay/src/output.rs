@@ -140,23 +140,48 @@ impl Output for FileOutput {
         let mut guard = self.writer.lock().await;
 
         // Lazily open the file in append mode, creating if needed.
+        // On Unix, reject symlinks to prevent symlink-following attacks.
         if guard.is_none() {
-            let file = tokio::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.path)
-                .await
-                .map_err(|e| {
-                    warn!(
-                        output = %self.name,
-                        path = %self.path.display(),
-                        "failed to open file output: {e}"
-                    );
-                    RelayError::OutputSendFailed {
-                        output: self.name.clone(),
-                        reason: format!("open {}: {e}", self.path.display()),
-                    }
-                })?;
+            // Check that the path is not a symlink (TOCTOU-mitigated by
+            // also using O_NOFOLLOW on platforms that support it).
+            #[cfg(unix)]
+            if self.path.is_symlink() {
+                let msg = format!(
+                    "refusing to open symlink at {} — potential symlink attack",
+                    self.path.display()
+                );
+                warn!(output = %self.name, path = %self.path.display(), "{msg}");
+                return Err(RelayError::OutputSendFailed {
+                    output: self.name.clone(),
+                    reason: msg,
+                });
+            }
+
+            let file = {
+                let mut opts = tokio::fs::OpenOptions::new();
+                opts.create(true).append(true);
+
+                // On Unix, use O_NOFOLLOW and restrictive permissions for new files
+                #[cfg(unix)]
+                {
+                    opts.custom_flags(libc::O_NOFOLLOW);
+                    opts.mode(0o640);
+                }
+
+                opts.open(&self.path).await
+            };
+
+            let file = file.map_err(|e| {
+                warn!(
+                    output = %self.name,
+                    path = %self.path.display(),
+                    "failed to open file output: {e}"
+                );
+                RelayError::OutputSendFailed {
+                    output: self.name.clone(),
+                    reason: format!("open {}: {e}", self.path.display()),
+                }
+            })?;
             *guard = Some(file);
         }
 

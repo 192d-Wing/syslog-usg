@@ -95,6 +95,9 @@ proptest = "1"
 subtle = "2"
 zeroize = "1"
 
+# Platform
+libc = "0.2"
+
 # Misc
 compact_str = { version = "0.9", features = ["serde"] }
 tokio-graceful-shutdown = "0.19"

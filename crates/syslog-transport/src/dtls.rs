@@ -213,6 +213,10 @@ const MAX_DATAGRAM_SIZE: usize = 65535;
 /// expired entries.  Keeps per-datagram overhead negligible.
 const SESSION_SWEEP_INTERVAL: u64 = 256;
 
+/// Maximum number of tracked DTLS sessions. Prevents unbounded HashMap
+/// growth from datagrams with many unique source addresses.
+const MAX_SESSIONS: usize = 100_000;
+
 // ---------------------------------------------------------------------------
 // Listener — plaintext UDP fallback
 // ---------------------------------------------------------------------------
@@ -261,6 +265,20 @@ pub async fn run_dtls_listener(
             result = socket.recv_from(&mut buf) => {
                 match result {
                     Ok((len, peer)) => {
+                        // Cap session table to prevent OOM from spoofed source addresses
+                        if sessions.len() >= MAX_SESSIONS && !sessions.contains_key(&peer) {
+                            // Force an immediate sweep before rejecting
+                            sweep_expired_sessions(&mut sessions, config.max_idle_timeout);
+                            if sessions.len() >= MAX_SESSIONS {
+                                warn!(
+                                    peer = %peer,
+                                    max = MAX_SESSIONS,
+                                    "DTLS session table full, dropping datagram"
+                                );
+                                continue;
+                            }
+                        }
+
                         // Update or create session
                         let session = sessions.entry(peer).or_insert_with(|| {
                             debug!(peer = %peer, "new DTLS (plaintext) session");
