@@ -219,7 +219,7 @@ impl ReplayDetector {
         // This prevents an attacker from flushing ALL replay state by flooding
         // with many distinct RSIDs.
         if self.seen.len() >= self.max_sessions && !self.seen.contains_key(&block.rsid) {
-            if let Some((&evict_rsid, _)) = self.seen.iter().min_by_key(|(_, gbc)| **gbc) {
+            if let Some((&evict_rsid, _)) = self.seen.iter().min_by_key(|(_, gbc)| *gbc) {
                 tracing::warn!(
                     evicted_rsid = evict_rsid,
                     table_size = self.seen.len(),
