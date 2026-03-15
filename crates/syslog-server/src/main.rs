@@ -325,8 +325,7 @@ fn build_routing_table(
                 vec![idx]
             }
             syslog_config::model::ActionTypeConfig::Buffer { name, size } => {
-                let buffer_output =
-                    BufferOutput::new(format!("buffer-action-{i}-{name}"), *size);
+                let buffer_output = BufferOutput::new(format!("buffer-action-{i}-{name}"), *size);
                 let idx = outputs.len();
                 outputs.push(ServerOutput::Buffer(buffer_output));
                 info!(

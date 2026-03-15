@@ -385,7 +385,9 @@ mod tests {
         let snap = output.snapshot().await;
         assert_eq!(snap.len(), 3);
         assert_eq!(
-            snap.first().and_then(|m| m.msg.as_ref()).map(|b| b.as_ref()),
+            snap.first()
+                .and_then(|m| m.msg.as_ref())
+                .map(|b| b.as_ref()),
             Some(b"msg1".as_slice())
         );
         assert_eq!(
@@ -413,7 +415,9 @@ mod tests {
         assert_eq!(snap.len(), 3);
         // Oldest (msg1) should have been dropped
         assert_eq!(
-            snap.first().and_then(|m| m.msg.as_ref()).map(|b| b.as_ref()),
+            snap.first()
+                .and_then(|m| m.msg.as_ref())
+                .map(|b| b.as_ref()),
             Some(b"msg2".as_slice())
         );
         assert_eq!(
