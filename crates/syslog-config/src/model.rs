@@ -58,14 +58,25 @@ pub struct ServerSettings {
     /// Graceful shutdown drain timeout in seconds.
     #[serde(default = "default_drain_timeout")]
     pub drain_timeout_seconds: u64,
+
+    /// When true (the default), refuse to start if private key files are
+    /// readable by group or other. Set to false only in development
+    /// environments.
+    #[serde(default = "default_strict_permissions")]
+    pub strict_permissions: bool,
 }
 
 impl Default for ServerSettings {
     fn default() -> Self {
         Self {
             drain_timeout_seconds: default_drain_timeout(),
+            strict_permissions: default_strict_permissions(),
         }
     }
+}
+
+fn default_strict_permissions() -> bool {
+    true
 }
 
 fn default_drain_timeout() -> u64 {
@@ -113,6 +124,13 @@ pub struct ListenerConfig {
     /// Defaults to 30 seconds when not specified.
     #[serde(default = "default_read_timeout_secs")]
     pub read_timeout_secs: Option<u64>,
+
+    /// For DTLS listeners: explicitly acknowledge that the listener will fall
+    /// back to plaintext UDP because no pure-Rust DTLS library is available.
+    /// Must be set to `true` when `protocol = "dtls"` or the server will
+    /// refuse to start. This prevents accidental unencrypted operation.
+    #[serde(default)]
+    pub dtls_plaintext_fallback: bool,
 }
 
 fn default_max_connections() -> Option<usize> {
@@ -124,7 +142,7 @@ fn default_read_timeout_secs() -> Option<u64> {
 }
 
 /// TLS configuration shared by listeners and outputs.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Clone, Deserialize, PartialEq)]
 pub struct TlsConfig {
     /// Path to PEM certificate file.
     pub cert_path: String,
@@ -138,6 +156,17 @@ pub struct TlsConfig {
 
     /// Optional path to a CA bundle for verifying client certificates.
     pub ca_path: Option<String>,
+}
+
+impl std::fmt::Debug for TlsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TlsConfig")
+            .field("cert_path", &self.cert_path)
+            .field("key_path", &"[REDACTED]")
+            .field("client_auth", &self.client_auth)
+            .field("ca_path", &self.ca_path)
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -250,7 +279,7 @@ fn default_max_message_size() -> usize {
 // ---------------------------------------------------------------------------
 
 /// RFC 5848 message signing configuration.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Clone, Deserialize, PartialEq)]
 pub struct SigningConfig {
     /// Whether signing is enabled.
     #[serde(default)]
@@ -277,6 +306,21 @@ pub struct SigningConfig {
     /// Directory for persisting signing state (RSID). Optional — if not set,
     /// RSID=0 is used per RFC 5848 §4.2.4.
     pub state_dir: Option<String>,
+}
+
+impl std::fmt::Debug for SigningConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SigningConfig")
+            .field("enabled", &self.enabled)
+            .field("key_path", &"[REDACTED]")
+            .field("cert_path", &self.cert_path)
+            .field("hash_algorithm", &self.hash_algorithm)
+            .field("signature_group", &self.signature_group)
+            .field("max_hashes_per_block", &self.max_hashes_per_block)
+            .field("cert_emit_interval_secs", &self.cert_emit_interval_secs)
+            .field("state_dir", &self.state_dir)
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -346,7 +390,7 @@ fn default_log_level() -> String {
 // ---------------------------------------------------------------------------
 
 /// Prometheus metrics exposition settings.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Clone, Deserialize, PartialEq)]
 pub struct MetricsConfig {
     /// Whether the metrics endpoint is enabled.
     #[serde(default)]
@@ -361,6 +405,23 @@ pub struct MetricsConfig {
     /// header. Health probes (`/healthz`, `/readyz`) remain unauthenticated.
     #[serde(default)]
     pub bearer_token: Option<String>,
+}
+
+impl std::fmt::Debug for MetricsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MetricsConfig")
+            .field("enabled", &self.enabled)
+            .field("bind_address", &self.bind_address)
+            .field(
+                "bearer_token",
+                if self.bearer_token.is_some() {
+                    &"[REDACTED]"
+                } else {
+                    &"None"
+                },
+            )
+            .finish()
+    }
 }
 
 impl Default for MetricsConfig {

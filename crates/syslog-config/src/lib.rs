@@ -172,6 +172,13 @@ fn validate(config: &ServerConfig) -> Result<(), ConfigError> {
                 "listeners[{i}]: DTLS protocol requires a [tls] section"
             )));
         }
+        if listener.protocol == ListenerProtocol::Dtls && !listener.dtls_plaintext_fallback {
+            return Err(ConfigError::Validation(format!(
+                "listeners[{i}]: DTLS currently falls back to plaintext UDP — \
+                 set dtls_plaintext_fallback = true to acknowledge this, \
+                 or use network-level encryption (IPsec/WireGuard)"
+            )));
+        }
     }
 
     // Validate outputs.
@@ -242,6 +249,10 @@ fn validate(config: &ServerConfig) -> Result<(), ConfigError> {
             if signing.key_path.is_empty() {
                 return Err(ConfigError::MissingField("signing.key_path".to_owned()));
             }
+            validate_path(&signing.key_path, "signing.key_path")?;
+            if let Some(ref cp) = signing.cert_path {
+                validate_path(cp, "signing.cert_path")?;
+            }
             if let Some(ref algo) = signing.hash_algorithm {
                 let valid = ["sha1", "sha256"];
                 if !valid.contains(&algo.as_str()) {
@@ -276,6 +287,9 @@ fn validate(config: &ServerConfig) -> Result<(), ConfigError> {
                 "verification.trusted_key_paths must not be empty when verification is enabled"
                     .to_owned(),
             ));
+        }
+        for (j, kp) in verification.trusted_key_paths.iter().enumerate() {
+            validate_path(kp, &format!("verification.trusted_key_paths[{j}]"))?;
         }
         if let Some(ref sp) = verification.state_path {
             validate_path(sp, "verification.state_path")?;

@@ -44,20 +44,20 @@ impl SigningKey {
     /// Generate a new random ECDSA P-256 key pair.
     ///
     /// Returns the signing key and the PKCS#8 DER-encoded document
-    /// (for persistence).
+    /// (for persistence) wrapped in [`Zeroizing`] to ensure private key
+    /// material is wiped from memory when dropped.
     ///
     /// # Errors
     ///
     /// Returns [`SignError::SigningFailed`] if key generation fails.
-    pub fn generate() -> Result<(Self, Vec<u8>), SignError> {
+    pub fn generate() -> Result<(Self, zeroize::Zeroizing<Vec<u8>>), SignError> {
         use zeroize::Zeroizing;
 
         let rng = SystemRandom::new();
         let pkcs8_doc = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng)
             .map_err(|e| SignError::SigningFailed(format!("key generation failed: {e}")))?;
         // Wrap in Zeroizing to ensure PKCS#8 bytes are wiped from memory on drop
-        let pkcs8_zeroizing = Zeroizing::new(pkcs8_doc.as_ref().to_vec());
-        let pkcs8_bytes = pkcs8_zeroizing.to_vec();
+        let pkcs8_bytes = Zeroizing::new(pkcs8_doc.as_ref().to_vec());
 
         let key_pair = EcdsaKeyPair::from_pkcs8(
             &ECDSA_P256_SHA256_ASN1_SIGNING,

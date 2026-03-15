@@ -5,6 +5,12 @@
 
 use crate::error::ParseError;
 
+/// Maximum allowed MSG-LEN value (2 MiB), matching the auto-detect parser limit.
+///
+/// Prevents downstream callers from pre-allocating unbounded buffers based on
+/// attacker-controlled length prefixes.
+const MAX_MSG_LEN: usize = 2 * 1024 * 1024;
+
 /// Parse the MSG-LEN prefix from an octet-counting framed syslog stream.
 ///
 /// Returns `(msg_len, header_len)` where `header_len` is the number of bytes
@@ -56,6 +62,13 @@ pub fn parse_frame_length(input: &[u8]) -> Result<(usize, usize), ParseError> {
         .parse()
         .map_err(|_| ParseError::InvalidPri(format!("MSG-LEN too large: {len_str}")))?;
 
+    if msg_len > MAX_MSG_LEN {
+        return Err(ParseError::MessageTooLarge {
+            max: MAX_MSG_LEN,
+            actual: msg_len,
+        });
+    }
+
     // header_len = digits + SP
     let header_len = sp_pos
         .checked_add(1)
@@ -105,5 +118,24 @@ mod tests {
     #[test]
     fn leading_space() {
         assert!(parse_frame_length(b" 123").is_err());
+    }
+
+    #[test]
+    fn msg_len_exceeds_max_rejected() {
+        // 3_000_000 > MAX_MSG_LEN (2 MiB = 2_097_152)
+        let input = b"3000000 data";
+        let result = parse_frame_length(input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn msg_len_at_max_accepted() {
+        // Exactly 2 MiB should be accepted
+        let input = b"2097152 data";
+        let result = parse_frame_length(input);
+        assert!(result.is_ok());
+        if let Ok((msg_len, _)) = result {
+            assert_eq!(msg_len, 2_097_152);
+        }
     }
 }

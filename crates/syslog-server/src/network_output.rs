@@ -120,10 +120,14 @@ impl NetworkOutput {
         }
     }
 
-    /// Add jitter to a duration (0-25% based on current timestamp).
+    /// Add jitter to a duration (0-25% based on system clock nanoseconds).
     fn jittered(d: Duration) -> Duration {
-        // Use low bits of current time nanos as cheap pseudo-random source
-        let nanos = Instant::now().elapsed().subsec_nanos();
+        // Use sub-second nanoseconds from the system clock as a cheap
+        // pseudo-random source. Unlike Instant::now().elapsed() (which is
+        // always ~0), SystemTime provides varying nanoseconds.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
         let jitter_pct = (nanos % 26) as u64; // 0-25%
         let jitter = d.as_millis() as u64 * jitter_pct / 100;
         d + Duration::from_millis(jitter)

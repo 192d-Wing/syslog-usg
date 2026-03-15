@@ -535,7 +535,13 @@ fn start_listeners(
                         }
                     };
 
-                    check_key_file_permissions(&tls_cfg.key_path);
+                    if let Err(e) = check_key_file_permissions(
+                        &tls_cfg.key_path,
+                        config.server.strict_permissions,
+                    ) {
+                        error!("{e}");
+                        continue;
+                    }
 
                     let transport_tls = syslog_transport::tls::TlsConfig {
                         cert_path: tls_cfg.cert_path.clone(),
@@ -688,7 +694,12 @@ fn build_signing_stage(config: &ServerConfig) -> Option<syslog_relay::SigningSta
     }
 
     // Load PKCS#8 private key (PEM or DER auto-detected)
-    check_key_file_permissions(&signing_cfg.key_path);
+    if let Err(e) =
+        check_key_file_permissions(&signing_cfg.key_path, config.server.strict_permissions)
+    {
+        error!("{e}");
+        return None;
+    }
     let key_bytes = match load_pem_or_der(&signing_cfg.key_path) {
         Ok(b) => b,
         Err(e) => {
@@ -932,10 +943,7 @@ fn load_pem_or_der(path: &str) -> Result<Vec<u8>, String> {
     // Check for PEM format
     if let Ok(text) = std::str::from_utf8(&raw) {
         if text.starts_with("-----BEGIN") {
-            let b64: String = text
-                .lines()
-                .filter(|l| !l.starts_with("-----"))
-                .collect();
+            let b64: String = text.lines().filter(|l| !l.starts_with("-----")).collect();
             return base64::engine::general_purpose::STANDARD
                 .decode(b64.trim())
                 .map_err(|e| format!("PEM base64 decode for {path}: {e}"));
@@ -954,9 +962,10 @@ fn gethostname() -> Option<String> {
 
 /// Check that a private key file is not group/world readable.
 ///
-/// On Unix, warns if the file mode allows group or other read access.
-/// On non-Unix platforms this is a no-op.
-fn check_key_file_permissions(path: &str) {
+/// On Unix, returns an error if `strict` is true and the file mode allows
+/// group or other read access. When `strict` is false, only a warning is
+/// logged. On non-Unix platforms this is a no-op.
+fn check_key_file_permissions(path: &str, strict: bool) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -965,6 +974,13 @@ fn check_key_file_permissions(path: &str) {
                 let mode = meta.permissions().mode();
                 // Check if group (0o040) or other (0o004) read bits are set
                 if mode & 0o044 != 0 {
+                    if strict {
+                        return Err(format!(
+                            "private key file {path} is readable by group/other \
+                             (mode {mode:04o}) — chmod 0600 or set \
+                             server.strict_permissions = false"
+                        ));
+                    }
                     warn!(
                         path = %path,
                         mode = format!("{mode:04o}"),
@@ -980,8 +996,9 @@ fn check_key_file_permissions(path: &str) {
     }
     #[cfg(not(unix))]
     {
-        let _ = path;
+        let _ = (path, strict);
     }
+    Ok(())
 }
 
 /// Write data to a file with restrictive permissions (0600 on Unix).

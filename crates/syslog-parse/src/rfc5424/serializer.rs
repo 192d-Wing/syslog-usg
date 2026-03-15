@@ -88,9 +88,23 @@ pub fn serialize(msg: &SyslogMessage) -> Vec<u8> {
     buf
 }
 
+/// Push a header field value, replacing any non-PRINTUSASCII bytes with `?`
+/// to prevent newline injection and log smuggling.
+///
+/// RFC 5424 §6: header fields (HOSTNAME, APP-NAME, PROCID, MSGID) must
+/// contain only PRINTUSASCII (%d33-126). The proto crate enforces this at
+/// construction, but raw/programmatic construction could bypass it.
 fn push_field(buf: &mut Vec<u8>, value: Option<&str>) {
     match value {
-        Some(s) => buf.extend_from_slice(s.as_bytes()),
+        Some(s) => {
+            for &b in s.as_bytes() {
+                if (33..=126).contains(&b) {
+                    buf.push(b);
+                } else {
+                    buf.push(b'?');
+                }
+            }
+        }
         None => buf.push(b'-'),
     }
 }
