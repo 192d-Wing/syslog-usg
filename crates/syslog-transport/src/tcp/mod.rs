@@ -183,9 +183,18 @@ async fn handle_tcp_connection(
                     peer,
                     tls: false,
                 };
-                if tx.send(msg).await.is_err() {
-                    debug!(peer = %peer, "channel closed, dropping TCP connection");
-                    return;
+                // Use a timeout on channel send to prevent blocking
+                // indefinitely if the pipeline is stalled.
+                match tokio::time::timeout(Duration::from_secs(5), tx.send(msg)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) => {
+                        debug!(peer = %peer, "channel closed, dropping TCP connection");
+                        return;
+                    }
+                    Err(_) => {
+                        warn!(peer = %peer, "pipeline backpressure timeout, dropping TCP connection");
+                        return;
+                    }
                 }
             }
             Some(Err(e)) => {
@@ -230,9 +239,18 @@ async fn handle_tls_connection(
                     peer,
                     tls: true,
                 };
-                if tx.send(msg).await.is_err() {
-                    debug!(peer = %peer, "channel closed, dropping TLS connection");
-                    return;
+                // Use a timeout on channel send to prevent blocking
+                // indefinitely if the pipeline is stalled.
+                match tokio::time::timeout(Duration::from_secs(5), tx.send(msg)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) => {
+                        debug!(peer = %peer, "channel closed, dropping TLS connection");
+                        return;
+                    }
+                    Err(_) => {
+                        warn!(peer = %peer, "pipeline backpressure timeout, dropping TLS connection");
+                        return;
+                    }
                 }
             }
             Some(Err(e)) => {
