@@ -4,7 +4,8 @@
 //! Maximum message size is 65535-8-20 = 65507 bytes, but implementers
 //! SHOULD support messages up to 2048 bytes (§3.2).
 
-use std::net::SocketAddr;
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -25,6 +26,8 @@ pub struct UdpListenerConfig {
     pub max_message_size: usize,
     /// Receive buffer size hint for SO_RCVBUF (0 = use default of 2 MiB).
     pub recv_buf_size: usize,
+    /// Maximum datagrams per source IP per rate-limit window (0 = unlimited).
+    pub max_per_source: u32,
 }
 
 impl Default for UdpListenerConfig {
@@ -33,6 +36,7 @@ impl Default for UdpListenerConfig {
             bind_addr: ([0, 0, 0, 0], 514).into(),
             max_message_size: 65535,
             recv_buf_size: 0,
+            max_per_source: 0,
         }
     }
 }
@@ -98,12 +102,42 @@ pub async fn run_udp_listener(
     info!(addr = %config.bind_addr, "UDP syslog listener started");
 
     let mut buf = vec![0u8; config.max_message_size];
+    let rate_limit = config.max_per_source;
+
+    // Simple per-source-IP rate limiter: count datagrams in the current window.
+    // The window resets every RATE_WINDOW_SECS seconds.
+    const RATE_WINDOW_SECS: u64 = 10;
+    let mut source_counts: HashMap<IpAddr, u32> = HashMap::new();
+    let mut window_start = std::time::Instant::now();
 
     loop {
+        // Reset rate-limit window periodically
+        if rate_limit > 0 && window_start.elapsed().as_secs() >= RATE_WINDOW_SECS {
+            source_counts.clear();
+            window_start = std::time::Instant::now();
+        }
+
         tokio::select! {
             result = socket.recv_from(&mut buf) => {
                 match result {
                     Ok((len, source)) => {
+                        // Per-source rate limiting
+                        if rate_limit > 0 {
+                            let count = source_counts.entry(source.ip()).or_insert(0);
+                            *count = count.saturating_add(1);
+                            if *count > rate_limit {
+                                if *count == rate_limit.saturating_add(1) {
+                                    warn!(
+                                        source = %source.ip(),
+                                        limit = rate_limit,
+                                        window_secs = RATE_WINDOW_SECS,
+                                        "per-source rate limit exceeded, dropping datagrams"
+                                    );
+                                }
+                                continue;
+                            }
+                        }
+
                         let data = Bytes::copy_from_slice(
                             buf.get(..len).unwrap_or_default()
                         );
