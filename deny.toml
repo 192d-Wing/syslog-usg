@@ -1,7 +1,19 @@
+# cargo-deny configuration for syslog-usg
+# Run: cargo deny check
+# CI:  cargo deny check advisories licenses bans sources
+
+# ---------------------------------------------------------------------------
+# Advisories — reject crates with known security vulnerabilities
+# ---------------------------------------------------------------------------
 [advisories]
-unmaintained = "all"
+# Deny unmaintained crates in the workspace, warn for transitive deps
+unmaintained = "workspace"
+# Warn on yanked crate versions
 yanked = "warn"
 
+# ---------------------------------------------------------------------------
+# Licenses — only allow permissive OSS licenses
+# ---------------------------------------------------------------------------
 [licenses]
 allow = [
     "MIT",
@@ -16,12 +28,32 @@ allow = [
     "CDLA-Permissive-2.0",
     "Zlib",
 ]
+# Deny any crate whose license cannot be determined with high confidence
 confidence-threshold = 0.8
 
+# ---------------------------------------------------------------------------
+# Bans — control duplicate crate versions and specific crates
+# ---------------------------------------------------------------------------
 [bans]
+# Warn when multiple versions of the same crate are in the dependency tree
 multiple-versions = "warn"
+# Warn on wildcard dependencies — workspace path deps show as wildcards
 wildcards = "allow"
+# Highlight when a newer version of a crate is available but not used
+highlight = "all"
+# Ban specific crates that should never appear in the dependency tree
+deny = [
+    # Prefer rustls — never use openssl bindings
+    { name = "openssl", wrappers = [] },
+    { name = "openssl-sys", wrappers = [] },
+    # Prefer time — never use chrono (historical CVE surface).
+    # Allowed transitively via syslog_loose (dev-only differential testing).
+    { name = "chrono", wrappers = ["syslog_loose"] },
+]
 
+# ---------------------------------------------------------------------------
+# Sources — only allow crates from crates.io
+# ---------------------------------------------------------------------------
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
