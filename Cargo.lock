@@ -1651,6 +1651,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "serde",
  "serde_json",
+ "subtle",
  "syslog-mgmt",
  "thiserror",
  "tokio",
@@ -1736,10 +1737,12 @@ dependencies = [
  "ring",
  "serde_json",
  "smallvec",
+ "subtle",
  "syslog-parse",
  "syslog-proto",
  "thiserror",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
