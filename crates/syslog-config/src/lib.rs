@@ -186,10 +186,31 @@ fn validate(config: &ServerConfig) -> Result<(), ConfigError> {
             "pipeline.channel_buffer_size must be > 0".to_owned(),
         ));
     }
+    if config.pipeline.channel_buffer_size > 1_000_000 {
+        return Err(ConfigError::Validation(
+            "pipeline.channel_buffer_size must be <= 1000000".to_owned(),
+        ));
+    }
     if config.pipeline.max_message_size == 0 {
         return Err(ConfigError::Validation(
             "pipeline.max_message_size must be > 0".to_owned(),
         ));
+    }
+    if config.pipeline.max_message_size > 2 * 1024 * 1024 {
+        return Err(ConfigError::Validation(
+            "pipeline.max_message_size must be <= 2097152 (2 MiB)".to_owned(),
+        ));
+    }
+
+    // Listener connection limits.
+    for (i, listener) in config.listeners.iter().enumerate() {
+        if let Some(max) = listener.max_connections {
+            if max > 100_000 {
+                return Err(ConfigError::Validation(format!(
+                    "listeners[{i}].max_connections must be <= 100000"
+                )));
+            }
+        }
     }
 
     // Signing configuration validation (RFC 5848).

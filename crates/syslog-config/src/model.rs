@@ -99,12 +99,22 @@ pub struct ListenerConfig {
     pub tls: Option<TlsConfig>,
 
     /// Maximum concurrent connections for TCP/TLS listeners.
-    #[serde(default)]
+    /// Defaults to 1000 when not specified.
+    #[serde(default = "default_max_connections")]
     pub max_connections: Option<usize>,
 
     /// Per-frame read timeout in seconds for TCP/TLS listeners.
-    #[serde(default)]
+    /// Defaults to 30 seconds when not specified.
+    #[serde(default = "default_read_timeout_secs")]
     pub read_timeout_secs: Option<u64>,
+}
+
+fn default_max_connections() -> Option<usize> {
+    Some(1000)
+}
+
+fn default_read_timeout_secs() -> Option<u64> {
+    Some(30)
 }
 
 /// TLS configuration shared by listeners and outputs.
