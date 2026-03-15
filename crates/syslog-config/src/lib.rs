@@ -110,6 +110,19 @@ fn resolve_var_expr(expr: &str) -> Result<String, ConfigError> {
 // Validation
 // ---------------------------------------------------------------------------
 
+/// Check that a file path does not contain directory traversal sequences.
+fn validate_path(path: &str, context: &str) -> Result<(), ConfigError> {
+    if path.is_empty() {
+        return Err(ConfigError::MissingField(format!("{context}")));
+    }
+    if path.contains("..") {
+        return Err(ConfigError::Validation(format!(
+            "{context}: path must not contain '..' (directory traversal)"
+        )));
+    }
+    Ok(())
+}
+
 /// Validate a parsed [`ServerConfig`].
 fn validate(config: &ServerConfig) -> Result<(), ConfigError> {
     // Validate listeners.
@@ -123,6 +136,13 @@ fn validate(config: &ServerConfig) -> Result<(), ConfigError> {
             return Err(ConfigError::Validation(format!(
                 "listeners[{i}]: TLS protocol requires a [tls] section"
             )));
+        }
+        if let Some(ref tls) = listener.tls {
+            validate_path(&tls.cert_path, &format!("listeners[{i}].tls.cert_path"))?;
+            validate_path(&tls.key_path, &format!("listeners[{i}].tls.key_path"))?;
+            if let Some(ref ca) = tls.ca_path {
+                validate_path(ca, &format!("listeners[{i}].tls.ca_path"))?;
+            }
         }
         if listener.protocol == ListenerProtocol::Dtls && listener.tls.is_none() {
             return Err(ConfigError::Validation(format!(
@@ -144,6 +164,13 @@ fn validate(config: &ServerConfig) -> Result<(), ConfigError> {
                 "outputs[{i}] ('{}'): TLS protocol requires a [tls] section",
                 output.name
             )));
+        }
+        if let Some(ref tls) = output.tls {
+            validate_path(&tls.cert_path, &format!("outputs[{i}].tls.cert_path"))?;
+            validate_path(&tls.key_path, &format!("outputs[{i}].tls.key_path"))?;
+            if let Some(ref ca) = tls.ca_path {
+                validate_path(ca, &format!("outputs[{i}].tls.ca_path"))?;
+            }
         }
         if output.protocol == OutputProtocol::Dtls && output.tls.is_none() {
             return Err(ConfigError::Validation(format!(
@@ -265,11 +292,7 @@ fn validate(config: &ServerConfig) -> Result<(), ConfigError> {
                 }
             }
             ActionTypeConfig::File { path } => {
-                if path.is_empty() {
-                    return Err(ConfigError::Validation(format!(
-                        "actions[{i}].action.path must not be empty"
-                    )));
-                }
+                validate_path(path, &format!("actions[{i}].action.path"))?;
             }
             ActionTypeConfig::Console | ActionTypeConfig::Discard => {}
         }
