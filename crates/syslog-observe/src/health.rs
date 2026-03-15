@@ -129,7 +129,12 @@ pub fn health_router_with_token(state: HealthState, bearer_token: Option<String>
 }
 
 /// Middleware that validates the `Authorization: Bearer <token>` header.
+///
+/// Uses constant-time comparison to prevent timing side-channel attacks
+/// that could allow an attacker to progressively determine the token.
 async fn bearer_auth(expected_token: Arc<String>, req: Request, next: Next) -> impl IntoResponse {
+    use subtle::ConstantTimeEq;
+
     let auth_header = req
         .headers()
         .get("authorization")
@@ -140,7 +145,12 @@ async fn bearer_auth(expected_token: Arc<String>, req: Request, next: Next) -> i
     expected_value.push_str(&expected_token);
 
     match auth_header {
-        Some(value) if value == expected_value => next.run(req).await.into_response(),
+        Some(value)
+            if value.len() == expected_value.len()
+                && bool::from(value.as_bytes().ct_eq(expected_value.as_bytes())) =>
+        {
+            next.run(req).await.into_response()
+        }
         _ => StatusCode::UNAUTHORIZED.into_response(),
     }
 }

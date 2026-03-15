@@ -91,6 +91,9 @@ socket2 = { version = "0.6", features = ["all"] }
 # Property-based testing
 proptest = "1"
 
+# Constant-time comparison
+subtle = "2"
+
 # Misc
 compact_str = { version = "0.9", features = ["serde"] }
 tokio-graceful-shutdown = "0.19"
