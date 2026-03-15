@@ -113,7 +113,7 @@ fn resolve_var_expr(expr: &str) -> Result<String, ConfigError> {
 /// Check that a file path does not contain directory traversal sequences.
 fn validate_path(path: &str, context: &str) -> Result<(), ConfigError> {
     if path.is_empty() {
-        return Err(ConfigError::MissingField(format!("{context}")));
+        return Err(ConfigError::MissingField(context.to_owned()));
     }
     if path.contains("..") {
         return Err(ConfigError::Validation(format!(
