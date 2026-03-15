@@ -267,6 +267,10 @@ pub struct SigningConfig {
 
     /// How often (seconds) to emit certificate blocks.
     pub cert_emit_interval_secs: Option<u64>,
+
+    /// Directory for persisting signing state (RSID). Optional — if not set,
+    /// RSID=0 is used per RFC 5848 §4.2.4.
+    pub state_dir: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

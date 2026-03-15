@@ -1734,7 +1734,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "bytes",
  "clap",
+ "compact_str",
  "metrics",
  "rustls",
  "syslog-config",
@@ -1743,6 +1745,7 @@ dependencies = [
  "syslog-parse",
  "syslog-proto",
  "syslog-relay",
+ "syslog-sign",
  "syslog-transport",
  "tokio",
  "tokio-rustls",

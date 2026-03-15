@@ -23,15 +23,41 @@ use syslog_mgmt::{SharedSyslogState, SyslogFeatures};
 use syslog_observe::{
     HealthState, LogReloadHandle, health_router_with_token, init_logging, init_metrics,
 };
+use syslog_relay::output::Output;
 use syslog_relay::{
-    AlarmFilter, MessageFilter, NonAlarmPolicy, Pipeline, PipelineIngress, RoutingRule,
-    RoutingTable,
+    AlarmFilter, FileOutput, MessageFilter, NonAlarmPolicy, Pipeline, PipelineIngress, RelayError,
+    RoutingRule, RoutingTable,
 };
+use syslog_transport::dtls::{DtlsDatagram, DtlsListenerConfig, run_dtls_listener};
 use syslog_transport::tcp::{TcpListenerConfig, TcpMessage, run_tcp_listener};
 use syslog_transport::tls::load_certs;
 use syslog_transport::udp::{UdpDatagram, UdpListenerConfig, run_udp_listener};
 
 use crate::network_output::NetworkOutput;
+
+/// Unified output type for the server pipeline, wrapping both network
+/// and file-based outputs behind a common [`Output`] implementation.
+#[derive(Debug, Clone)]
+enum ServerOutput {
+    Network(NetworkOutput),
+    File(FileOutput),
+}
+
+impl Output for ServerOutput {
+    fn name(&self) -> &str {
+        match self {
+            Self::Network(o) => o.name(),
+            Self::File(o) => o.name(),
+        }
+    }
+
+    async fn send(&self, message: syslog_proto::SyslogMessage) -> Result<(), RelayError> {
+        match self {
+            Self::Network(o) => o.send(message).await,
+            Self::File(o) => o.send(message).await,
+        }
+    }
+}
 
 /// syslog-usg: Production-grade syslog server and relay.
 #[derive(Parser, Debug)]
@@ -92,8 +118,13 @@ async fn main() {
     // Shutdown coordination
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    // Build outputs from config
-    let outputs = build_outputs(&config);
+    // Build outputs from config (network outputs + file outputs from actions)
+    let mut outputs = build_outputs(&config);
+    let network_output_count = outputs.len();
+
+    // Add file outputs from management actions and build routing table
+    let routing_table = build_routing_table(&config, network_output_count, &mut outputs);
+
     if outputs.is_empty() {
         warn!("no outputs configured — messages will be received but not forwarded");
     }
@@ -105,9 +136,6 @@ async fn main() {
     // Build optional signing/verification stages (RFC 5848)
     let signing = build_signing_stage(&config);
     let verification = build_verification_stage(&config);
-
-    // Build routing table from management actions
-    let routing_table = build_routing_table(&config, outputs.len());
 
     let (mut pipeline, ingress, pipeline_shutdown) = Pipeline::with_management(
         channel_capacity,
@@ -250,7 +278,14 @@ fn detect_features(config: &ServerConfig) -> SyslogFeatures {
 }
 
 /// Build the routing table from management action configurations.
-fn build_routing_table(config: &ServerConfig, output_count: usize) -> Option<RoutingTable> {
+///
+/// File actions create `FileOutput` entries appended to `outputs` and are
+/// routed to the corresponding index.
+fn build_routing_table(
+    config: &ServerConfig,
+    network_output_count: usize,
+    outputs: &mut Vec<ServerOutput>,
+) -> Option<RoutingTable> {
     if config.actions.is_empty() {
         return None;
     }
@@ -266,24 +301,30 @@ fn build_routing_table(config: &ServerConfig, output_count: usize) -> Option<Rou
         };
 
         // Map action type to output indices.
-        // For now, Remote actions map to all outputs (future: match by host/port).
-        // Console/Discard/File/Buffer actions don't route to network outputs.
         let output_indices: Vec<usize> = match &action_cfg.action {
-            syslog_config::model::ActionTypeConfig::Remote { .. } => (0..output_count).collect(),
-            syslog_config::model::ActionTypeConfig::Console => {
-                // Console action: route to all outputs for now
-                (0..output_count).collect()
+            syslog_config::model::ActionTypeConfig::Remote { .. } => {
+                (0..network_output_count).collect()
             }
+            syslog_config::model::ActionTypeConfig::Console => (0..network_output_count).collect(),
             syslog_config::model::ActionTypeConfig::Discard => {
-                // Discard: route to no outputs (message will be dropped)
                 vec![]
             }
-            syslog_config::model::ActionTypeConfig::File { .. }
-            | syslog_config::model::ActionTypeConfig::Buffer { .. } => {
-                // File/Buffer: not yet implemented as outputs
+            syslog_config::model::ActionTypeConfig::File { path } => {
+                let file_output = FileOutput::new(format!("file-action-{i}"), path.as_str());
+                let idx = outputs.len();
+                outputs.push(ServerOutput::File(file_output));
                 info!(
                     action_index = i,
-                    "file/buffer action types are not yet network-routable"
+                    path = %path,
+                    output_index = idx,
+                    "file output configured from management action"
+                );
+                vec![idx]
+            }
+            syslog_config::model::ActionTypeConfig::Buffer { .. } => {
+                info!(
+                    action_index = i,
+                    "buffer action type is not yet implemented"
                 );
                 continue;
             }
@@ -373,8 +414,59 @@ fn start_listeners(
                 info!(addr = %addr, "UDP listener configured");
             }
             ListenerProtocol::Dtls => {
-                error!(addr = %addr, "DTLS listener not yet implemented (RFC 6012) — remove from config");
-                continue;
+                let dtls_config = DtlsListenerConfig::new(
+                    addr,
+                    listener_cfg
+                        .tls
+                        .as_ref()
+                        .map(|t| t.cert_path.clone().into())
+                        .unwrap_or_default(),
+                    listener_cfg
+                        .tls
+                        .as_ref()
+                        .map(|t| t.key_path.clone().into())
+                        .unwrap_or_default(),
+                );
+
+                let (dtls_tx, mut dtls_rx) =
+                    mpsc::channel::<DtlsDatagram>(config.pipeline.channel_buffer_size);
+                let shutdown = shutdown_rx.clone();
+                let ingress = ingress.clone();
+                let state = shared_state.clone();
+
+                // Spawn the DTLS (plaintext-fallback) listener
+                handles.push(tokio::spawn(async move {
+                    if let Err(e) = run_dtls_listener(&dtls_config, dtls_tx, shutdown).await {
+                        error!("DTLS listener error: {e}");
+                    }
+                }));
+
+                // Spawn the parser bridge (DTLS datagrams -> parsed messages -> pipeline)
+                handles.push(tokio::spawn(async move {
+                    while let Some(datagram) = dtls_rx.recv().await {
+                        state.counters().increment_received();
+                        match syslog_parse::parse(&datagram.payload) {
+                            Ok(msg) => {
+                                if let Err(e) = ingress.send(msg).await {
+                                    warn!("pipeline send error: {e}");
+                                    return;
+                                }
+                            }
+                            Err(e) => {
+                                state.counters().increment_malformed();
+                                warn!(
+                                    source = %datagram.peer,
+                                    "parse error: {}",
+                                    sanitize_log_msg(&e.to_string())
+                                );
+                                metrics::counter!("syslog_messages_parsed_total", "format" => "invalid")
+                                    .increment(1);
+                            }
+                        }
+                    }
+                }));
+
+                info!(addr = %addr, "DTLS (plaintext-fallback) listener configured");
             }
             ListenerProtocol::Tcp | ListenerProtocol::Tls => {
                 let tls_acceptor = if listener_cfg.protocol == ListenerProtocol::Tls {
@@ -527,10 +619,10 @@ fn build_signing_stage(config: &ServerConfig) -> Option<syslog_relay::SigningSta
     use bytes::Bytes;
     use compact_str::CompactString;
     use syslog_proto::{Facility, Severity, StructuredData, SyslogMessage, SyslogTimestamp};
+    use syslog_sign::SigningKey;
     use syslog_sign::counter::RebootSessionId;
     use syslog_sign::signer::{Signer, SignerConfig};
     use syslog_sign::types::{HashAlgorithm, SignatureGroup};
-    use syslog_sign::SigningKey;
 
     let signing_cfg = config.signing.as_ref()?;
     if !signing_cfg.enabled {
@@ -556,18 +648,20 @@ fn build_signing_stage(config: &ServerConfig) -> Option<syslog_relay::SigningSta
     };
 
     // Load optional DER-encoded X.509 certificate
-    let cert_der = signing_cfg.cert_path.as_ref().and_then(|cert_path| {
-        match std::fs::read(cert_path) {
-            Ok(b) => {
-                info!(path = %cert_path, "loaded signing certificate");
-                Some(b)
-            }
-            Err(e) => {
-                warn!(path = %cert_path, "failed to read signing certificate: {e}");
-                None
-            }
-        }
-    });
+    let cert_der =
+        signing_cfg
+            .cert_path
+            .as_ref()
+            .and_then(|cert_path| match std::fs::read(cert_path) {
+                Ok(b) => {
+                    info!(path = %cert_path, "loaded signing certificate");
+                    Some(b)
+                }
+                Err(e) => {
+                    warn!(path = %cert_path, "failed to read signing certificate: {e}");
+                    None
+                }
+            });
 
     // Parse config options
     let hash_algorithm = match signing_cfg.hash_algorithm.as_deref() {
@@ -589,12 +683,14 @@ fn build_signing_stage(config: &ServerConfig) -> Option<syslog_relay::SigningSta
         ..Default::default()
     };
 
-    let rsid = RebootSessionId::unpersisted();
+    let rsid = match &signing_cfg.state_dir {
+        Some(dir) => load_or_increment_rsid(dir),
+        None => RebootSessionId::unpersisted(),
+    };
     let signer = Signer::new(signing_key, rsid, signer_config);
 
-    let cert_interval = std::time::Duration::from_secs(
-        signing_cfg.cert_emit_interval_secs.unwrap_or(3600),
-    );
+    let cert_interval =
+        std::time::Duration::from_secs(signing_cfg.cert_emit_interval_secs.unwrap_or(3600));
 
     // Build a template message for signature/certificate block messages
     let hostname = gethostname().unwrap_or_else(|| "syslog-usg".to_owned());
@@ -670,6 +766,75 @@ fn build_verification_stage(config: &ServerConfig) -> Option<syslog_relay::Verif
     Some(stage)
 }
 
+/// Load the persisted RSID from `<state_dir>/rsid`, increment it, and write back.
+/// If the file doesn't exist, starts at 1.
+/// Returns `RebootSessionId::unpersisted()` on any error (with a warning log).
+fn load_or_increment_rsid(state_dir: &str) -> syslog_sign::counter::RebootSessionId {
+    use syslog_sign::counter::RebootSessionId;
+
+    let dir = std::path::Path::new(state_dir);
+    let rsid_path = dir.join("rsid");
+    let tmp_path = dir.join("rsid.tmp");
+
+    // Validate no directory traversal
+    if state_dir.contains("..") {
+        warn!(path = %state_dir, "state_dir contains '..' — using unpersisted RSID");
+        return RebootSessionId::unpersisted();
+    }
+
+    // Read existing value (or default to 0)
+    let current: u64 = match std::fs::read_to_string(&rsid_path) {
+        Ok(contents) => match contents.trim().parse::<u64>() {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(path = %rsid_path.display(), "failed to parse RSID file: {e} — using unpersisted RSID");
+                return RebootSessionId::unpersisted();
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(e) => {
+            warn!(path = %rsid_path.display(), "failed to read RSID file: {e} — using unpersisted RSID");
+            return RebootSessionId::unpersisted();
+        }
+    };
+
+    let next = current.saturating_add(1);
+
+    // Ensure the directory exists
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        warn!(path = %state_dir, "failed to create state directory: {e} — using unpersisted RSID");
+        return RebootSessionId::unpersisted();
+    }
+
+    // Atomic write: write to tmp, then rename
+    if let Err(e) = std::fs::write(&tmp_path, next.to_string()) {
+        warn!(path = %tmp_path.display(), "failed to write RSID tmp file: {e} — using unpersisted RSID");
+        return RebootSessionId::unpersisted();
+    }
+    if let Err(e) = std::fs::rename(&tmp_path, &rsid_path) {
+        warn!(
+            src = %tmp_path.display(),
+            dst = %rsid_path.display(),
+            "failed to rename RSID file: {e} — using unpersisted RSID"
+        );
+        return RebootSessionId::unpersisted();
+    }
+
+    match RebootSessionId::new(next) {
+        Ok(rsid) => {
+            info!(rsid = next, path = %rsid_path.display(), "persisted RSID loaded and incremented");
+            rsid
+        }
+        Err(e) => {
+            warn!(
+                value = next,
+                "RSID value out of range: {e} — using unpersisted RSID"
+            );
+            RebootSessionId::unpersisted()
+        }
+    }
+}
+
 /// Get the system hostname from the `HOSTNAME` environment variable.
 ///
 /// Returns `None` if the variable is not set or empty.
@@ -710,7 +875,7 @@ fn check_key_file_permissions(path: &str) {
 }
 
 /// Build network outputs from configuration.
-fn build_outputs(config: &ServerConfig) -> Vec<NetworkOutput> {
+fn build_outputs(config: &ServerConfig) -> Vec<ServerOutput> {
     let mut outputs = Vec::new();
 
     for output_cfg in &config.outputs {
@@ -743,7 +908,7 @@ fn build_outputs(config: &ServerConfig) -> Vec<NetworkOutput> {
                     proto = proto_label,
                     "output configured"
                 );
-                outputs.push(output);
+                outputs.push(ServerOutput::Network(output));
             }
             OutputProtocol::Tls => {
                 let tls_cfg = match &output_cfg.tls {
@@ -816,7 +981,7 @@ fn build_outputs(config: &ServerConfig) -> Vec<NetworkOutput> {
                     cert = %tls_cfg.cert_path,
                     "TLS output certificate path"
                 );
-                outputs.push(output);
+                outputs.push(ServerOutput::Network(output));
             }
             OutputProtocol::Dtls => {
                 warn!(
@@ -964,5 +1129,41 @@ mod tests {
     #[test]
     fn extract_host_bare() {
         assert_eq!(extract_host("localhost"), "localhost");
+    }
+
+    #[test]
+    fn load_or_increment_rsid_persists_and_increments() {
+        let dir = std::env::temp_dir().join("syslog_rsid_test");
+        // Clean up from any previous run
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let dir_str = match dir.to_str() {
+            Some(s) => s.to_owned(),
+            None => return,
+        };
+
+        // First call: file doesn't exist, should start at 1
+        let rsid1 = load_or_increment_rsid(&dir_str);
+        assert_eq!(rsid1.value(), 1);
+
+        // Second call: file contains "1", should increment to 2
+        let rsid2 = load_or_increment_rsid(&dir_str);
+        assert_eq!(rsid2.value(), 2);
+
+        // Verify the file contains "2"
+        let contents = match std::fs::read_to_string(dir.join("rsid")) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        assert_eq!(contents, "2");
+
+        // Clean up
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_or_increment_rsid_rejects_traversal() {
+        let rsid = load_or_increment_rsid("/tmp/../etc/evil");
+        assert_eq!(rsid.value(), 0);
     }
 }

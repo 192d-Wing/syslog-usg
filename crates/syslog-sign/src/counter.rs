@@ -64,7 +64,7 @@ impl Default for GlobalBlockCounter {
 /// RFC 5848 §4.2.4: RSID is a decimal value 0–9999999999.
 /// MUST strictly monotonically increase across reboots.
 /// If persistence cannot be guaranteed, MUST always be 0.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebootSessionId {
     value: u64,
 }

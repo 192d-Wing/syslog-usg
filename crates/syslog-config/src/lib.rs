@@ -240,6 +240,9 @@ fn validate(config: &ServerConfig) -> Result<(), ConfigError> {
                     "signing.max_hashes_per_block must be > 0".to_owned(),
                 ));
             }
+            if let Some(ref dir) = signing.state_dir {
+                validate_path(dir, "signing.state_dir")?;
+            }
         }
     }
 

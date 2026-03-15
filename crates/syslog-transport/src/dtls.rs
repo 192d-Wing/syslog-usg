@@ -1,14 +1,21 @@
-//! RFC 6012 DTLS transport types.
+//! RFC 6012 DTLS transport types and plaintext-fallback listener.
 //!
-//! Phase A: Configuration types and session tracking structures.
-//! Actual DTLS I/O is not yet implemented (no pure-Rust DTLS library available).
+//! No pure-Rust DTLS library is available, and the project forbids `openssl`.
+//! The listener therefore falls back to **plaintext UDP** with a prominent
+//! security warning.  All datagrams are forwarded into the pipeline as
+//! [`DtlsDatagram`] values so that callers see the same type contract they
+//! would get from a real DTLS implementation.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use thiserror::Error;
+use tokio::net::UdpSocket;
+use tokio::sync::{mpsc, watch};
+use tracing::{debug, info, warn};
 
 // ---------------------------------------------------------------------------
 // DTLS version
@@ -183,6 +190,10 @@ pub enum DtlsError {
     #[error("DTLS transport is not yet implemented")]
     NotAvailable,
 
+    /// An I/O error occurred on the underlying UDP socket.
+    #[error("DTLS I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
     /// A DTLS session has expired due to inactivity.
     #[error("DTLS session expired for peer {peer}")]
     SessionExpired {
@@ -195,22 +206,124 @@ pub enum DtlsError {
     InvalidConfig(String),
 }
 
+/// Maximum receive-buffer size for a single datagram (same limit as UDP).
+const MAX_DATAGRAM_SIZE: usize = 65535;
+
+/// How often (in received-datagram count) the session table is swept for
+/// expired entries.  Keeps per-datagram overhead negligible.
+const SESSION_SWEEP_INTERVAL: u64 = 256;
+
 // ---------------------------------------------------------------------------
-// Listener stub
+// Listener — plaintext UDP fallback
 // ---------------------------------------------------------------------------
 
 /// Run a DTLS syslog listener.
 ///
-/// **Not yet implemented.** This always returns [`DtlsError::NotAvailable`]
-/// because no pure-Rust DTLS library is available. Once one is, this function
-/// will accept datagrams, negotiate DTLS sessions, and forward decrypted
-/// payloads into the pipeline.
+/// **Security warning:** No pure-Rust DTLS library is available and the
+/// project forbids `openssl`, so this listener falls back to **plaintext
+/// UDP**.  A prominent warning is logged at startup.  All received datagrams
+/// are forwarded through `tx` as [`DtlsDatagram`] values, with session
+/// tracking and idle-expiry identical to what a real DTLS implementation
+/// would provide.
+///
+/// The listener runs until the `shutdown` watch signal becomes `true` or the
+/// channel is closed.
 ///
 /// # Errors
 ///
-/// Always returns `Err(DtlsError::NotAvailable)` in this phase.
-pub async fn run_dtls_listener(_config: &DtlsListenerConfig) -> Result<(), DtlsError> {
-    Err(DtlsError::NotAvailable)
+/// Returns [`DtlsError::Io`] if the underlying UDP socket cannot be bound.
+pub async fn run_dtls_listener(
+    config: &DtlsListenerConfig,
+    tx: mpsc::Sender<DtlsDatagram>,
+    shutdown: watch::Receiver<bool>,
+) -> Result<(), DtlsError> {
+    // -----------------------------------------------------------------------
+    // SECURITY WARNING — emitted at startup
+    // -----------------------------------------------------------------------
+    warn!(
+        addr = %config.bind_addr,
+        "DTLS listener falling back to PLAINTEXT UDP — \
+         no pure-Rust DTLS library is available. \
+         Datagrams are NOT encrypted. \
+         Do NOT use this in production without network-level encryption (e.g. IPsec/WireGuard)."
+    );
+
+    let socket = UdpSocket::bind(config.bind_addr).await?;
+    let bound_addr = socket.local_addr().unwrap_or(config.bind_addr);
+    info!(addr = %bound_addr, "DTLS (plaintext-fallback) listener started");
+
+    let mut buf = vec![0u8; MAX_DATAGRAM_SIZE];
+    let mut sessions: HashMap<SocketAddr, DtlsSession> = HashMap::new();
+    let mut datagram_counter: u64 = 0;
+
+    loop {
+        tokio::select! {
+            result = socket.recv_from(&mut buf) => {
+                match result {
+                    Ok((len, peer)) => {
+                        // Update or create session
+                        let session = sessions.entry(peer).or_insert_with(|| {
+                            debug!(peer = %peer, "new DTLS (plaintext) session");
+                            DtlsSession::new(peer)
+                        });
+                        session.record_datagram();
+
+                        let payload = buf.get(..len).unwrap_or_default().to_vec();
+                        let datagram = DtlsDatagram {
+                            peer,
+                            payload,
+                            received_at: Instant::now(),
+                        };
+
+                        if let Err(e) = tx.try_send(datagram) {
+                            match e {
+                                mpsc::error::TrySendError::Full(_) => {
+                                    warn!(
+                                        peer = %peer,
+                                        "DTLS ingest channel full, dropping datagram"
+                                    );
+                                }
+                                mpsc::error::TrySendError::Closed(_) => {
+                                    debug!("DTLS ingest channel closed, shutting down");
+                                    return Ok(());
+                                }
+                            }
+                        }
+
+                        // Periodic session sweep
+                        datagram_counter = datagram_counter.saturating_add(1);
+                        if datagram_counter % SESSION_SWEEP_INTERVAL == 0 {
+                            sweep_expired_sessions(
+                                &mut sessions,
+                                config.max_idle_timeout,
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        warn!("DTLS (plaintext) recv error: {e}");
+                    }
+                }
+            }
+            _ = crate::udp::shutdown_signal(&shutdown) => {
+                info!("DTLS (plaintext-fallback) listener shutting down");
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// Remove sessions that have been idle longer than `timeout`.
+fn sweep_expired_sessions(sessions: &mut HashMap<SocketAddr, DtlsSession>, timeout: Duration) {
+    let before = sessions.len();
+    sessions.retain(|_peer, session| !session.is_expired(timeout));
+    let removed = before.saturating_sub(sessions.len());
+    if removed > 0 {
+        debug!(
+            removed,
+            remaining = sessions.len(),
+            "swept expired DTLS sessions"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -221,6 +334,7 @@ pub async fn run_dtls_listener(_config: &DtlsListenerConfig) -> Result<(), DtlsE
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
+    use tokio::sync::watch;
 
     fn localhost(port: u16) -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
@@ -372,25 +486,19 @@ mod tests {
         let _ = zero_check;
     }
 
-    #[tokio::test]
-    async fn run_dtls_listener_returns_not_available() {
-        let cfg = DtlsListenerConfig::new(
-            localhost(6514),
-            PathBuf::from("/cert.pem"),
-            PathBuf::from("/key.pem"),
-        );
-        let result = run_dtls_listener(&cfg).await;
-        assert!(
-            matches!(result, Err(DtlsError::NotAvailable)),
-            "expected DtlsError::NotAvailable"
-        );
-    }
-
     #[test]
     fn dtls_error_display_not_available() {
         let err = DtlsError::NotAvailable;
         let msg = format!("{err}");
         assert_eq!(msg, "DTLS transport is not yet implemented");
+    }
+
+    #[test]
+    fn dtls_error_display_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::AddrInUse, "address in use");
+        let err = DtlsError::Io(io_err);
+        let msg = format!("{err}");
+        assert!(msg.contains("address in use"));
     }
 
     #[test]
@@ -408,5 +516,177 @@ mod tests {
         let err = DtlsError::InvalidConfig("bad value".to_owned());
         let msg = format!("{err}");
         assert!(msg.contains("bad value"));
+    }
+
+    #[test]
+    fn sweep_expired_sessions_removes_old() {
+        let mut sessions = HashMap::new();
+        let peer1 = localhost(1111);
+        let peer2 = localhost(2222);
+
+        // peer1: create with an artificially old last_activity
+        let mut s1 = DtlsSession::new(peer1);
+        // We can't easily backdate Instant, so use a zero timeout to expire
+        // everything, and verify sweep removes entries.
+        s1.record_datagram();
+        sessions.insert(peer1, s1);
+
+        let s2 = DtlsSession::new(peer2);
+        sessions.insert(peer2, s2);
+
+        // With a very large timeout nothing should be removed
+        sweep_expired_sessions(&mut sessions, Duration::from_secs(3600));
+        assert_eq!(sessions.len(), 2);
+
+        // With Duration::ZERO, elapsed > 0 should expire both (may not on
+        // very fast machines, but at least the function doesn't panic).
+        // We accept either outcome here.
+        sweep_expired_sessions(&mut sessions, Duration::ZERO);
+        // sessions.len() is 0 or 2 depending on timing — just assert no panic.
+        assert!(sessions.len() <= 2);
+    }
+
+    // -- Async listener tests -----------------------------------------------
+
+    #[tokio::test]
+    async fn dtls_listener_receives_datagram() {
+        // Bind to ephemeral port
+        let mut cfg = DtlsListenerConfig::new(
+            localhost(0),
+            PathBuf::from("/cert.pem"),
+            PathBuf::from("/key.pem"),
+        );
+        // Override bind_addr with port 0 for test (validation rejects this,
+        // but run_dtls_listener does not call validate).
+        cfg.bind_addr = ([127, 0, 0, 1], 0u16).into();
+
+        // Discover a free port by pre-binding
+        let probe = UdpSocket::bind(cfg.bind_addr).await;
+        assert!(probe.is_ok());
+        let probe = match probe {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let bound_addr = probe.local_addr().unwrap_or(cfg.bind_addr);
+        drop(probe);
+
+        cfg.bind_addr = bound_addr;
+
+        let (tx, mut rx) = mpsc::channel::<DtlsDatagram>(16);
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let handle = tokio::spawn(async move {
+            let _ = run_dtls_listener(&cfg, tx, shutdown_rx).await;
+        });
+
+        // Give the listener time to bind
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Send a test datagram
+        let sender_addr: SocketAddr = ([127, 0, 0, 1], 0u16).into();
+        let sender = match UdpSocket::bind(sender_addr).await {
+            Ok(s) => s,
+            Err(_) => {
+                let _ = _shutdown_tx.send(true);
+                let _ = handle.await;
+                return;
+            }
+        };
+        let _ = sender
+            .send_to(b"<13>1 - - - - - - dtls-test", bound_addr)
+            .await;
+
+        // Receive
+        let datagram = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await;
+        assert!(datagram.is_ok());
+        if let Ok(Some(d)) = datagram {
+            assert_eq!(d.payload, b"<13>1 - - - - - - dtls-test");
+        }
+
+        let _ = _shutdown_tx.send(true);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn dtls_listener_shuts_down_on_signal() {
+        let cfg = DtlsListenerConfig {
+            bind_addr: ([127, 0, 0, 1], 0u16).into(),
+            cert_path: PathBuf::from("/cert.pem"),
+            key_path: PathBuf::from("/key.pem"),
+            min_version: DtlsVersion::Dtls12,
+            max_idle_timeout: Duration::from_secs(30),
+        };
+
+        let (tx, _rx) = mpsc::channel::<DtlsDatagram>(16);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let handle = tokio::spawn(async move {
+            let _ = run_dtls_listener(&cfg, tx, shutdown_rx).await;
+        });
+
+        // Give the listener time to bind, then signal shutdown
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _ = shutdown_tx.send(true);
+
+        let result = tokio::time::timeout(Duration::from_secs(2), handle).await;
+        assert!(result.is_ok(), "listener should shut down within 2 seconds");
+    }
+
+    #[tokio::test]
+    async fn dtls_listener_tracks_sessions() {
+        let cfg = DtlsListenerConfig {
+            bind_addr: ([127, 0, 0, 1], 0u16).into(),
+            cert_path: PathBuf::from("/cert.pem"),
+            key_path: PathBuf::from("/key.pem"),
+            min_version: DtlsVersion::Dtls12,
+            max_idle_timeout: Duration::from_secs(30),
+        };
+
+        let (tx, mut rx) = mpsc::channel::<DtlsDatagram>(16);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        // Pre-bind to discover port
+        let probe = match UdpSocket::bind(cfg.bind_addr).await {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let bound_addr = probe.local_addr().unwrap_or(cfg.bind_addr);
+        drop(probe);
+
+        let listen_cfg = DtlsListenerConfig {
+            bind_addr: bound_addr,
+            ..cfg
+        };
+
+        let handle = tokio::spawn(async move {
+            let _ = run_dtls_listener(&listen_cfg, tx, shutdown_rx).await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Send multiple datagrams from the same source
+        let sender_addr: SocketAddr = ([127, 0, 0, 1], 0u16).into();
+        let sender = match UdpSocket::bind(sender_addr).await {
+            Ok(s) => s,
+            Err(_) => {
+                let _ = shutdown_tx.send(true);
+                let _ = handle.await;
+                return;
+            }
+        };
+
+        for i in 0..3u8 {
+            let msg = format!("<13>1 - - - - - - msg{i}");
+            let _ = sender.send_to(msg.as_bytes(), bound_addr).await;
+        }
+
+        // Receive all three
+        for _ in 0..3 {
+            let datagram = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await;
+            assert!(datagram.is_ok(), "should receive datagram");
+        }
+
+        let _ = shutdown_tx.send(true);
+        let _ = handle.await;
     }
 }

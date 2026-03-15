@@ -5,10 +5,13 @@
 //! a file, or a test collector).
 
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use syslog_proto::SyslogMessage;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
+use tracing::warn;
 
 use crate::error::RelayError;
 
@@ -102,6 +105,97 @@ impl Output for ForwardOutput {
     }
 }
 
+/// An output that writes serialized RFC 5424 syslog messages to a file.
+///
+/// The file is opened lazily on the first `send()` call in append mode,
+/// creating it if it does not exist. Each message is followed by a newline.
+#[derive(Debug, Clone)]
+pub struct FileOutput {
+    name: String,
+    path: PathBuf,
+    writer: Arc<Mutex<Option<tokio::fs::File>>>,
+}
+
+impl FileOutput {
+    /// Create a new `FileOutput` with the given name and file path.
+    ///
+    /// The file is not opened until the first message is sent.
+    #[must_use]
+    pub fn new(name: impl Into<String>, path: impl Into<PathBuf>) -> Self {
+        Self {
+            name: name.into(),
+            path: path.into(),
+            writer: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+impl Output for FileOutput {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn send(&self, message: SyslogMessage) -> Result<(), RelayError> {
+        let mut guard = self.writer.lock().await;
+
+        // Lazily open the file in append mode, creating if needed.
+        if guard.is_none() {
+            let file = tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)
+                .await
+                .map_err(|e| {
+                    warn!(
+                        output = %self.name,
+                        path = %self.path.display(),
+                        "failed to open file output: {e}"
+                    );
+                    RelayError::OutputSendFailed {
+                        output: self.name.clone(),
+                        reason: format!("open {}: {e}", self.path.display()),
+                    }
+                })?;
+            *guard = Some(file);
+        }
+
+        // Serialize the message to RFC 5424 wire format.
+        let mut wire = syslog_parse::rfc5424::serializer::serialize(&message);
+        wire.push(b'\n');
+
+        let file = guard.as_mut().ok_or_else(|| RelayError::OutputSendFailed {
+            output: self.name.clone(),
+            reason: "file not open".to_owned(),
+        })?;
+
+        file.write_all(&wire).await.map_err(|e| {
+            warn!(
+                output = %self.name,
+                path = %self.path.display(),
+                "failed to write to file output: {e}"
+            );
+            RelayError::OutputSendFailed {
+                output: self.name.clone(),
+                reason: format!("write to {}: {e}", self.path.display()),
+            }
+        })?;
+
+        file.flush().await.map_err(|e| {
+            warn!(
+                output = %self.name,
+                path = %self.path.display(),
+                "failed to flush file output: {e}"
+            );
+            RelayError::OutputSendFailed {
+                output: self.name.clone(),
+                reason: format!("flush {}: {e}", self.path.display()),
+            }
+        })?;
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,5 +255,64 @@ mod tests {
         assert_eq!(DropPolicy::DropNewest.to_string(), "drop_newest");
         assert_eq!(DropPolicy::DropOldest.to_string(), "drop_oldest");
         assert_eq!(DropPolicy::Block.to_string(), "block");
+    }
+
+    #[tokio::test]
+    async fn file_output_writes_message() {
+        let dir = std::env::temp_dir().join("syslog-usg-test-file-output");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test_write.log");
+        // Clean up any previous run
+        let _ = std::fs::remove_file(&path);
+
+        let output = FileOutput::new("file-test", path.clone());
+        assert_eq!(output.name(), "file-test");
+
+        let msg = make_message(b"hello file");
+        let result = output.send(msg).await;
+        assert!(result.is_ok());
+
+        let contents = std::fs::read_to_string(&path).unwrap_or_default();
+        // Should contain RFC 5424 serialized message followed by newline
+        assert!(contents.contains("testhost"));
+        assert!(contents.contains("testapp"));
+        assert!(contents.contains("hello file"));
+        assert!(contents.ends_with('\n'));
+
+        // Clean up
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn file_output_appends_multiple_messages() {
+        let dir = std::env::temp_dir().join("syslog-usg-test-file-output");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test_append.log");
+        let _ = std::fs::remove_file(&path);
+
+        let output = FileOutput::new("file-append", path.clone());
+
+        let r1 = output.send(make_message(b"first")).await;
+        assert!(r1.is_ok());
+
+        let r2 = output.send(make_message(b"second")).await;
+        assert!(r2.is_ok());
+
+        let contents = std::fs::read_to_string(&path).unwrap_or_default();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), 2, "expected two lines, got: {contents}");
+        assert!(lines.first().is_some_and(|l| l.contains("first")));
+        assert!(lines.get(1).is_some_and(|l| l.contains("second")));
+
+        // Clean up
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn file_output_name() {
+        let output = FileOutput::new("my-file", "/tmp/dummy.log");
+        assert_eq!(output.name(), "my-file");
     }
 }
