@@ -1,0 +1,13 @@
+target/
+.git/
+.github/
+fuzz/
+benches/
+docs/
+examples/
+tests/
+*.md
+*.toml.bak
+.gitignore
+.dockerignore
+deny.toml

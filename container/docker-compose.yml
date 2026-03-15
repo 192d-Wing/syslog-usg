@@ -1,0 +1,41 @@
+# syslog-usg — Docker Compose for local development and testing
+#
+# Usage:
+#   docker compose up -d          # Start syslog-usg
+#   docker compose logs -f        # Follow logs
+#   docker compose down           # Stop
+#
+# Send test messages:
+#   echo "<13>1 2024-01-01T00:00:00Z host app - - - test" | nc -u 127.0.0.1 1514
+
+services:
+  syslog-usg:
+    build:
+      context: ..
+      dockerfile: container/Dockerfile
+    container_name: syslog-usg
+    restart: unless-stopped
+    ports:
+      # UDP syslog (non-privileged port for dev)
+      - "1514:1514/udp"
+      # TCP syslog
+      - "1514:1514/tcp"
+      # Metrics / management HTTP
+      - "9090:9090/tcp"
+    volumes:
+      # Configuration
+      - ../examples/config-docker.toml:/etc/syslog-usg/config.toml:ro
+      # State persistence (RSID, replay detector)
+      - syslog-state:/var/lib/syslog-usg
+    environment:
+      - HOSTNAME=syslog-usg-dev
+    # Health check via the liveness probe
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/syslog-usg", "--help"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  syslog-state:

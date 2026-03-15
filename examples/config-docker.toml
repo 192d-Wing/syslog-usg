@@ -1,0 +1,22 @@
+# syslog-usg — Docker Configuration
+#
+# Binds to 0.0.0.0 for container networking. Suitable for use with
+# docker-compose.yml or standalone container deployment.
+
+[[listeners]]
+protocol = "udp"
+bind_address = "0.0.0.0:1514"
+
+[[listeners]]
+protocol = "tcp"
+bind_address = "0.0.0.0:1514"
+max_connections = 500
+read_timeout_secs = 30
+
+[logging]
+level = "info"
+format = "json"
+
+[metrics]
+enabled = true
+bind_address = "0.0.0.0:9090"

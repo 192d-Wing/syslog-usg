@@ -1,0 +1,58 @@
+[Unit]
+Description=syslog-usg — Production-grade syslog server and relay
+Documentation=https://github.com/syslog-usg/syslog-usg
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=syslog
+Group=syslog
+
+# Binary and config
+ExecStart=/usr/local/bin/syslog-usg --config /etc/syslog-usg/config.toml
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart policy
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Capability to bind to privileged ports (514) without running as root
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Sandboxing (systemd hardening)
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+MemoryDenyWriteExecute=true
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+# Writable directories for state persistence
+ReadWritePaths=/var/lib/syslog-usg
+ReadWritePaths=/var/log/syslog-usg
+StateDirectory=syslog-usg
+LogsDirectory=syslog-usg
+
+# Environment
+Environment=HOSTNAME=%H
+
+[Install]
+WantedBy=multi-user.target
