@@ -95,7 +95,13 @@ impl Verifier {
                     actual: hex_string(&computed),
                 })?;
 
-            if computed != *expected {
+            // Use constant-time comparison to prevent timing side-channels
+            if computed.len() != expected.len()
+                || !bool::from(subtle::ConstantTimeEq::ct_eq(
+                    computed.as_slice(),
+                    expected.as_slice(),
+                ))
+            {
                 return Err(SignError::HashChainMismatch {
                     index: i,
                     expected: hex_string(expected),
