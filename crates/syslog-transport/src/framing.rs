@@ -88,6 +88,20 @@ impl Decoder for OctetCountingCodec {
                     TransportError::InvalidFrame(format!("MSG-LEN too large: {len_str}"))
                 })?;
 
+                // RFC 6587 §3.4.1: MSG-LEN = NONZERO-DIGIT *DIGIT — zero is invalid
+                if msg_len == 0 {
+                    return Err(TransportError::InvalidFrame(
+                        "MSG-LEN must not be zero (RFC 6587 §3.4.1)".to_owned(),
+                    ));
+                }
+
+                // RFC 6587 §3.4.1: MSG-LEN = NONZERO-DIGIT *DIGIT — leading zeros are invalid
+                if len_bytes.first() == Some(&b'0') && sp_pos > 1 {
+                    return Err(TransportError::InvalidFrame(
+                        "MSG-LEN must not have leading zeros (RFC 6587 §3.4.1)".to_owned(),
+                    ));
+                }
+
                 if msg_len > self.max_frame_size {
                     return Err(TransportError::FrameTooLarge {
                         size: msg_len,
@@ -197,6 +211,22 @@ mod tests {
         let mut codec = OctetCountingCodec::with_max_frame_size(4);
         let mut buf = BytesMut::new();
         let result = codec.encode(b"hello", &mut buf);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn decode_zero_length_rejected() {
+        let mut codec = OctetCountingCodec::new();
+        let mut buf = BytesMut::from("0 ");
+        let result = codec.decode(&mut buf);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn decode_leading_zeros_rejected() {
+        let mut codec = OctetCountingCodec::new();
+        let mut buf = BytesMut::from("011 hello world");
+        let result = codec.decode(&mut buf);
         assert!(result.is_err());
     }
 

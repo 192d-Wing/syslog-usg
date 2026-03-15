@@ -163,7 +163,8 @@ proptest! {
     }
 
     // ---------------------------------------------------------------------------
-    // Property: empty frame (zero-length message) encodes/decodes correctly
+    // Property: empty frame (zero-length message) is rejected per RFC 6587 §3.4.1
+    // MSG-LEN = NONZERO-DIGIT *DIGIT, so "0" is not a valid MSG-LEN.
     // ---------------------------------------------------------------------------
 
     #[test]
@@ -176,10 +177,8 @@ proptest! {
         prop_assert!(result.is_ok());
         prop_assert_eq!(&encoded[..], b"0 ");
 
+        // RFC 6587 §3.4.1: MSG-LEN of 0 is invalid (must start with NONZERO-DIGIT)
         let decode_result = decoder.decode(&mut encoded);
-        prop_assert!(decode_result.is_ok());
-        if let Ok(Some(frame)) = decode_result {
-            prop_assert_eq!(frame.len(), 0);
-        }
+        prop_assert!(decode_result.is_err());
     }
 }

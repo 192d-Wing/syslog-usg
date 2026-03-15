@@ -62,6 +62,20 @@ pub fn parse_frame_length(input: &[u8]) -> Result<(usize, usize), ParseError> {
         .parse()
         .map_err(|_| ParseError::InvalidPri(format!("MSG-LEN too large: {len_str}")))?;
 
+    // RFC 6587 §3.4.1: MSG-LEN = NONZERO-DIGIT *DIGIT — zero is invalid
+    if msg_len == 0 {
+        return Err(ParseError::InvalidPri(
+            "MSG-LEN must not be zero (RFC 6587 §3.4.1)".to_owned(),
+        ));
+    }
+
+    // RFC 6587 §3.4.1: MSG-LEN = NONZERO-DIGIT *DIGIT — leading zeros are invalid
+    if len_bytes.first() == Some(&b'0') && len_bytes.len() > 1 {
+        return Err(ParseError::InvalidPri(
+            "MSG-LEN must not have leading zeros (RFC 6587 §3.4.1)".to_owned(),
+        ));
+    }
+
     if msg_len > MAX_MSG_LEN {
         return Err(ParseError::MessageTooLarge {
             max: MAX_MSG_LEN,
@@ -124,6 +138,20 @@ mod tests {
     fn msg_len_exceeds_max_rejected() {
         // 3_000_000 > MAX_MSG_LEN (2 MiB = 2_097_152)
         let input = b"3000000 data";
+        let result = parse_frame_length(input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn msg_len_zero_rejected() {
+        let input = b"0 ";
+        let result = parse_frame_length(input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn msg_len_leading_zeros_rejected() {
+        let input = b"011 hello world";
         let result = parse_frame_length(input);
         assert!(result.is_err());
     }

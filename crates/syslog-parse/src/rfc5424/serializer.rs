@@ -2,6 +2,7 @@
 
 use syslog_proto::{SyslogMessage, SyslogTimestamp};
 use time::format_description::well_known::Rfc3339;
+use tracing::warn;
 
 /// Serialize an RFC 5424 `SyslogMessage` into its wire-format byte representation.
 ///
@@ -31,6 +32,8 @@ pub fn serialize(msg: &SyslogMessage) -> Vec<u8> {
             if let Ok(s) = dt.format(&Rfc3339) {
                 buf.extend_from_slice(s.as_bytes());
             } else {
+                // RFC 5424 §6.2.3: fall back to NILVALUE if formatting fails
+                warn!("timestamp formatting failed, falling back to NILVALUE");
                 buf.push(b'-');
             }
         }

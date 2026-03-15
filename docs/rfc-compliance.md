@@ -15,7 +15,7 @@ This document tracks which RFCs syslog-usg implements, the level of compliance, 
 
 | Section | Requirement | Level | Implementation |
 |---------|-------------|-------|----------------|
-| §6.1 | Message size SHOULD be ≤2048 octets | SHOULD | Transport layer enforces max frame size; convention constant `MAX_MESSAGE_SIZE = 2048` |
+| §6.1 | Message size SHOULD be ≤2048 octets | SHOULD | Convention constant `MAX_MESSAGE_SIZE = 2048` in `syslog-mgmt`; transport layer default is 64 KiB (configurable) |
 | §6.2.1 | PRI value 0–191, Facility 0–23, Severity 0–7 | MUST | `syslog-proto` `Facility`/`Severity` enums, parser validates range |
 | §6.2.2 | VERSION = "1" | MUST | Parser validates, serializer emits "1" |
 | §6.2.3 | TIMESTAMP in RFC 3339 format or NILVALUE | MUST | `time` crate formatting, NILVALUE ("-") supported |
@@ -74,12 +74,12 @@ Best-effort heuristic parser with fallback for legacy BSD syslog messages. Not a
 
 ### RFC 6012 — DTLS Transport Mapping for Syslog
 
-**Status: Types Only (I/O Not Implemented)**
+**Status: Types and Session Tracking (Plaintext UDP Fallback)**
 **Crate:** `syslog-transport`
 
 | Section | Requirement | Level | Implementation |
 |---------|-------------|-------|----------------|
-| §4 | DTLS session state per peer | — | Type definitions only; DTLS listener not implemented |
+| §4 | DTLS session state per peer | — | Type definitions and session tracking; listener falls back to plaintext UDP (no pure-Rust DTLS library available) |
 
 Configuration is accepted but the listener is skipped at runtime. See security review F-07.
 
@@ -121,7 +121,7 @@ Signing and verification are integrated as pipeline stages in `syslog-relay`.
 
 1. **ECDSA P-256 instead of DSA (§4.2.2):** RFC 5848 mandates OpenPGP DSA (scheme=1) as the mandatory-to-implement signature scheme. This implementation uses ECDSA P-256 (scheme=2) instead. DSA was deprecated by NIST in 2018; ECDSA P-256 provides equivalent or stronger security with constant-time operations via `ring`. Incoming DSA-signed messages are logged with a warning and rejected. This deviation breaks interoperability with peers using the original DSA scheme.
 
-2. **Signature groups SG=1/2/3 (§4.2.3):** Per-PRI (SG=1), PRI-ranges (SG=2), and custom (SG=3) grouping modes are type-defined and can be parsed, but only SG=0 (Global) is functionally wired in the signing pipeline. All messages are signed in a single global group.
+2. **Signature groups SG=1/2/3 (§4.2.3):** Per-PRI (SG=1), PRI-ranges (SG=2), and custom (SG=3) grouping modes are type-defined and can be parsed, but only SG=0 (Global) is functionally wired in the signing pipeline. All messages are signed in a single global group. Configuration validation rejects SG modes 1-3 with an explicit error.
 
 3. **X.509 path validation (§4.2.6):** Implemented via `validate_certificate()` in `syslog-sign`, using `rustls-webpki` for RFC 5280 chain validation. Callers should use `Verifier::from_validated_certificate()` to enforce trust anchors.
 
@@ -205,13 +205,13 @@ All compliance claims are backed by tests across the workspace:
 | Crate | Tests | Key RFC Coverage |
 |-------|-------|-----------------|
 | `syslog-proto` | 114 | RFC 5424 types, RFC 5427 names, RFC 5674 alarms |
-| `syslog-parse` | 36 | RFC 5424 parser/serializer roundtrip, RFC 3164 best-effort |
-| `syslog-transport` | 26 | RFC 5425 TLS, RFC 5426 UDP, octet-counting codec, RFC 9662 cipher suite verification |
+| `syslog-parse` | 38 | RFC 5424 parser/serializer roundtrip, RFC 3164 best-effort |
+| `syslog-transport` | 37 | RFC 5425 TLS, RFC 5426 UDP, octet-counting codec, RFC 9662 cipher suite verification |
 | `syslog-config` | 29 | Config validation for all RFC features |
-| `syslog-relay` | 83 | Pipeline stages: alarm filter, signing, verification (incl. DSA scheme rejection), routing |
-| `syslog-observe` | 15 | RFC 9742 management endpoints |
-| `syslog-server` | 4 | End-to-end integration (UDP/TCP) |
-| `syslog-sign` | 73 | RFC 5848 signing/verification, hash chains, cert fragmentation, X.509 path validation |
+| `syslog-relay` | 91 | Pipeline stages: alarm filter, signing, verification (incl. DSA scheme rejection), routing |
+| `syslog-observe` | 18 | RFC 9742 management endpoints |
+| `syslog-server` | 9 | End-to-end integration (UDP/TCP) |
+| `syslog-sign` | 84 | RFC 5848 signing/verification, hash chains, cert fragmentation, X.509 path validation |
 | `syslog-mgmt` | 106 | RFC 9742/5427 model, selectors, actions, counters |
 
 Additional testing: property-based tests (`proptest`), fuzz targets, and differential tests against reference implementations.

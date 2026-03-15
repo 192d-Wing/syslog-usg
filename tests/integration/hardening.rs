@@ -389,10 +389,11 @@ fn codec_frame_too_large() {
 
 #[test]
 fn codec_zero_length_frame() {
+    // RFC 6587 §3.4.1: MSG-LEN = NONZERO-DIGIT *DIGIT — zero is invalid
     let mut codec = OctetCountingCodec::new();
     let mut buf = BytesMut::from("0 ");
     let result = codec.decode(&mut buf);
-    assert!(matches!(result, Ok(Some(ref frame)) if frame.is_empty()));
+    assert!(result.is_err(), "MSG-LEN=0 should be rejected per RFC 6587");
 }
 
 #[test]
