@@ -49,6 +49,28 @@ pub fn build_server_config(config: &TlsConfig) -> Result<Arc<ServerConfig>, Tran
     let cert_chain = load_certs(&config.cert_path)?;
     let private_key = load_private_key(&config.key_path)?;
 
+    // RFC 9662 §3: build a CryptoProvider with only compliant cipher suites.
+    // Mandatory: TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 (TLS 1.2)
+    // Also include the TLS 1.3 equivalents and ECDSA variants.
+    let provider = rustls::crypto::CryptoProvider {
+        cipher_suites: vec![
+            // TLS 1.3
+            rustls::crypto::ring::cipher_suite::TLS13_AES_256_GCM_SHA384,
+            rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256,
+            rustls::crypto::ring::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
+            // TLS 1.2 — GCM-only (RFC 9662)
+            rustls::crypto::ring::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+            rustls::crypto::ring::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+            rustls::crypto::ring::cipher_suite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+            rustls::crypto::ring::cipher_suite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+        ],
+        ..rustls::crypto::ring::default_provider()
+    };
+
+    let builder = ServerConfig::builder_with_provider(Arc::new(provider))
+        .with_protocol_versions(&[&rustls::version::TLS12, &rustls::version::TLS13])
+        .map_err(|e| TransportError::InvalidFrame(format!("TLS version config failed: {e}")))?;
+
     let server_config = if config.client_auth {
         // RFC 5425 §5.2: mutual TLS — require and verify client certificates
         // Safety: validated above that client_ca_path is Some
@@ -72,12 +94,12 @@ pub fn build_server_config(config: &TlsConfig) -> Result<Arc<ServerConfig>, Tran
 
         info!("mTLS enabled: client certificate verification required");
 
-        ServerConfig::builder()
+        builder
             .with_client_cert_verifier(verifier)
             .with_single_cert(cert_chain, private_key)
             .map_err(TransportError::Tls)?
     } else {
-        ServerConfig::builder()
+        builder
             .with_no_client_auth()
             .with_single_cert(cert_chain, private_key)
             .map_err(TransportError::Tls)?
@@ -86,7 +108,7 @@ pub fn build_server_config(config: &TlsConfig) -> Result<Arc<ServerConfig>, Tran
     // RFC 5425 §5.2: ALPN is not defined for syslog-over-TLS
     // RFC 9662: 0-RTT MUST be disabled — rustls doesn't support 0-RTT on server by default
 
-    info!("TLS server configuration loaded");
+    info!("TLS server configuration loaded (RFC 9662 cipher suites enforced)");
 
     Ok(Arc::new(server_config))
 }
