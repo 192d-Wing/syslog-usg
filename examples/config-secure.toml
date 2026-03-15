@@ -1,0 +1,137 @@
+# syslog-usg — Secure Production Configuration Example
+#
+# This configuration demonstrates a hardened deployment with:
+# - TLS listener with mutual authentication (mTLS)
+# - UDP listener on localhost only (for local apps)
+# - RFC 5848 message signing
+# - RFC 5848 signature verification
+# - Authenticated management endpoints
+# - Alarm filtering (RFC 5674)
+#
+# Environment variables:
+#   SYSLOG_METRICS_TOKEN — bearer token for /metrics and /management/*
+#   SYSLOG_RELAY_HOST    — downstream relay address (default: 10.0.0.2)
+
+# ---------------------------------------------------------------------------
+# Server
+# ---------------------------------------------------------------------------
+[server]
+drain_timeout_seconds = 10
+
+# ---------------------------------------------------------------------------
+# Listeners
+# ---------------------------------------------------------------------------
+
+# TLS listener with client certificate verification (mTLS)
+# RFC 5425: TLS transport mapping for syslog
+[[listeners]]
+protocol = "tls"
+bind_address = "0.0.0.0:6514"
+max_connections = 1000
+read_timeout_secs = 30
+
+[listeners.tls]
+cert_path = "/etc/syslog-usg/tls/server.crt"
+key_path = "/etc/syslog-usg/tls/server.key"
+client_auth = true
+ca_path = "/etc/syslog-usg/tls/client-ca.crt"
+
+# UDP listener — localhost only for local applications
+# RFC 5426: UDP has no authentication; restrict to trusted interfaces
+[[listeners]]
+protocol = "udp"
+bind_address = "127.0.0.1:514"
+
+# ---------------------------------------------------------------------------
+# Outputs
+# ---------------------------------------------------------------------------
+
+# Forward to a central TLS-secured relay
+[[outputs]]
+name = "central-relay"
+protocol = "tls"
+address = "${SYSLOG_RELAY_HOST:-10.0.0.2}:6514"
+
+[outputs.tls]
+cert_path = "/etc/syslog-usg/tls/relay-client.crt"
+key_path = "/etc/syslog-usg/tls/relay-client.key"
+ca_path = "/etc/syslog-usg/tls/relay-ca.crt"
+
+# ---------------------------------------------------------------------------
+# Pipeline
+# ---------------------------------------------------------------------------
+[pipeline]
+channel_buffer_size = 8192
+max_message_size = 65536
+signing_fail_open = false  # Drop messages if signing fails
+
+# Alarm filter — only forward critical/major alarms
+[pipeline.alarm_filter]
+enabled = true
+min_severity = "major"
+event_types = ["communicationsAlarm", "equipmentAlarm", "processingErrorAlarm"]
+non_alarm_policy = "pass"
+max_active_alarms = 10000
+
+# ---------------------------------------------------------------------------
+# Signing (RFC 5848)
+# ---------------------------------------------------------------------------
+[signing]
+enabled = true
+key_path = "/etc/syslog-usg/sign/signing.key"
+cert_path = "/etc/syslog-usg/sign/signing.crt"
+hash_algorithm = "sha256"
+signature_group = "global"
+max_hashes_per_block = 25
+cert_emit_interval_secs = 3600
+
+# ---------------------------------------------------------------------------
+# Verification (RFC 5848)
+# ---------------------------------------------------------------------------
+[verification]
+enabled = true
+trusted_key_paths = [
+    "/etc/syslog-usg/sign/trusted-upstream-1.pub",
+    "/etc/syslog-usg/sign/trusted-upstream-2.pub",
+]
+reject_unverified = false  # Accept unsigned messages (set true for strict mode)
+
+# ---------------------------------------------------------------------------
+# Management Actions (RFC 9742)
+# ---------------------------------------------------------------------------
+
+# Forward critical alerts to a dedicated security collector
+[[actions]]
+description = "Security alerts to SOC"
+[actions.selector]
+min_severity = "critical"
+facilities = ["auth", "authpriv"]
+[actions.action]
+type = "remote"
+host = "soc-collector.internal"
+port = 6514
+protocol = "tls"
+
+# Discard debug-level messages from noisy applications
+[[actions]]
+description = "Drop verbose debug from chatty-app"
+[actions.selector]
+max_severity = "debug"
+app_name_pattern = "^chatty-app$"
+[actions.action]
+type = "discard"
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+[logging]
+level = "info"
+format = "json"
+
+# ---------------------------------------------------------------------------
+# Metrics & Management
+# ---------------------------------------------------------------------------
+[metrics]
+enabled = true
+bind_address = "127.0.0.1:9090"
+bearer_token = "${SYSLOG_METRICS_TOKEN}"

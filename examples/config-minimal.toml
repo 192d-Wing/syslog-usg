@@ -1,0 +1,25 @@
+# syslog-usg — Minimal Configuration
+#
+# Accepts syslog over UDP and TCP on localhost, forwards to a single
+# TCP destination. Suitable for development and testing.
+
+[[listeners]]
+protocol = "udp"
+bind_address = "127.0.0.1:1514"
+
+[[listeners]]
+protocol = "tcp"
+bind_address = "127.0.0.1:1514"
+
+[[outputs]]
+name = "upstream"
+protocol = "tcp"
+address = "127.0.0.1:2514"
+
+[logging]
+level = "debug"
+format = "text"
+
+[metrics]
+enabled = true
+bind_address = "127.0.0.1:9090"
