@@ -1642,10 +1642,13 @@ name = "syslog-integration-tests"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "compact_str",
  "syslog-parse",
  "syslog-proto",
  "syslog-relay",
+ "syslog-sign",
  "syslog-transport",
+ "tempfile",
  "tokio",
  "tokio-util",
 ]

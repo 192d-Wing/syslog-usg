@@ -29,7 +29,7 @@ pub use alarm_filter::{AlarmFilter, AlarmFilterBuilder, NonAlarmPolicy};
 pub use alarm_state::{AlarmEntry, AlarmKey, AlarmStateChange, AlarmStateTable};
 pub use error::RelayError;
 pub use filter::{MessageFilter, SeverityFilter};
-pub use output::{BufferOutput, DropPolicy, FileOutput, ForwardOutput, Output};
+pub use output::{BufferOutput, ConsoleOutput, DropPolicy, FileOutput, ForwardOutput, Output};
 pub use pipeline::{Pipeline, PipelineIngress, ShutdownHandle};
 pub use queue::BoundedQueue;
 pub use routing::{RoutingRule, RoutingTable};

@@ -129,6 +129,7 @@ async fn tcp_end_to_end() {
         max_frame_size: 64 * 1024,
         tls_acceptor: None,
         max_connections: None,
+        max_connections_per_ip: None,
         read_timeout: None,
         idle_timeout: None,
     };
@@ -221,6 +222,7 @@ async fn tcp_multiple_messages() {
         max_frame_size: 64 * 1024,
         tls_acceptor: None,
         max_connections: None,
+        max_connections_per_ip: None,
         read_timeout: None,
         idle_timeout: None,
     };

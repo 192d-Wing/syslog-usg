@@ -4,7 +4,8 @@
 //! syslog messages using the octet-counting codec (RFC 5425 §4.3).
 //! Can also upgrade connections to TLS.
 
-use std::net::SocketAddr;
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,6 +41,10 @@ pub struct TcpListenerConfig {
     /// Maximum number of concurrent TCP/TLS connections.
     /// When the limit is reached, new connections are rejected with a warning.
     pub max_connections: Option<usize>,
+    /// Maximum concurrent connections from a single source IP.
+    /// When exceeded, new connections from that IP are rejected.
+    /// Default: None (unlimited per-IP).
+    pub max_connections_per_ip: Option<usize>,
     /// Per-frame read timeout. If no complete frame arrives within this
     /// duration the connection is closed.
     pub read_timeout: Option<Duration>,
@@ -55,8 +60,28 @@ impl Default for TcpListenerConfig {
             max_frame_size: 64 * 1024,
             tls_acceptor: None,
             max_connections: None,
+            max_connections_per_ip: None,
             read_timeout: None,
             idle_timeout: None,
+        }
+    }
+}
+
+/// RAII guard that decrements the per-IP connection count on drop.
+struct PerIpGuard {
+    ip: IpAddr,
+    counts: Arc<std::sync::Mutex<HashMap<IpAddr, usize>>>,
+}
+
+impl Drop for PerIpGuard {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.counts.lock() {
+            if let Some(count) = map.get_mut(&self.ip) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    map.remove(&self.ip);
+                }
+            }
         }
     }
 }
@@ -77,6 +102,10 @@ pub async fn run_tcp_listener(
 
     // F-02: connection limit semaphore
     let semaphore = config.max_connections.map(|n| Arc::new(Semaphore::new(n)));
+
+    // Per-IP connection tracking
+    let per_ip_counts: Arc<std::sync::Mutex<HashMap<IpAddr, usize>>> =
+        Arc::new(std::sync::Mutex::new(HashMap::new()));
 
     // Effective read timeout: explicit read_timeout takes precedence, then idle_timeout.
     let effective_timeout = config.read_timeout.or(config.idle_timeout);
@@ -111,6 +140,32 @@ pub async fn run_tcp_listener(
                             None
                         };
 
+                        // Per-IP connection limit check
+                        let per_ip_guard = if let Some(max_per_ip) = config.max_connections_per_ip {
+                            match per_ip_counts.lock() {
+                                Ok(mut counts) => {
+                                    let count = counts.entry(peer.ip()).or_insert(0);
+                                    if *count >= max_per_ip {
+                                        warn!(
+                                            peer = %peer,
+                                            limit = max_per_ip,
+                                            "per-IP connection limit reached, rejecting"
+                                        );
+                                        drop(stream);
+                                        continue;
+                                    }
+                                    *count += 1;
+                                    Some(PerIpGuard {
+                                        ip: peer.ip(),
+                                        counts: Arc::clone(&per_ip_counts),
+                                    })
+                                }
+                                Err(_) => None,
+                            }
+                        } else {
+                            None
+                        };
+
                         // Harden TCP socket: disable Nagle for framing
                         // correctness and enable keepalive to detect
                         // half-open connections.
@@ -122,8 +177,10 @@ pub async fn run_tcp_listener(
                         let tls_acceptor = tls_acceptor.clone();
 
                         tokio::spawn(async move {
-                            // Keep the permit alive for the lifetime of the connection
+                            // Keep the permit and per-IP guard alive for the
+                            // lifetime of the connection
                             let _permit = permit;
+                            let _per_ip_guard = per_ip_guard;
                             if let Some(acceptor) = tls_acceptor {
                                 match acceptor.accept(stream).await {
                                     Ok(tls_stream) => {
@@ -291,6 +348,20 @@ mod tests {
         watch::Sender<bool>,
         tokio::task::JoinHandle<Result<(), crate::error::TransportError>>,
     )> {
+        start_listener_with_per_ip(max_connections, None, read_timeout).await
+    }
+
+    /// Helper: start a TCP listener with optional per-IP limit.
+    async fn start_listener_with_per_ip(
+        max_connections: Option<usize>,
+        max_connections_per_ip: Option<usize>,
+        read_timeout: Option<Duration>,
+    ) -> Option<(
+        SocketAddr,
+        mpsc::Receiver<TcpMessage>,
+        watch::Sender<bool>,
+        tokio::task::JoinHandle<Result<(), crate::error::TransportError>>,
+    )> {
         let bind: SocketAddr = ([127, 0, 0, 1], 0u16).into();
         let tmp = TcpListener::bind(bind).await.ok()?;
         let addr = tmp.local_addr().ok()?;
@@ -301,6 +372,7 @@ mod tests {
             max_frame_size: 8192,
             tls_acceptor: None,
             max_connections,
+            max_connections_per_ip,
             read_timeout,
             idle_timeout: None,
         };
@@ -375,6 +447,63 @@ mod tests {
             // may not fail depending on platform buffering, but the handler
             // has exited.
             let _ = c.write_all(b"5 hello").await;
+        }
+
+        let _ = shutdown_tx.send(true);
+        let _ = tokio::time::timeout(Duration::from_secs(2), listener_handle).await;
+    }
+
+    /// Per-IP connection limit rejects excess connections from the same source.
+    #[tokio::test]
+    async fn test_max_connections_per_ip() {
+        let Some((addr, mut rx, shutdown_tx, listener_handle)) =
+            start_listener_with_per_ip(None, Some(1), None).await
+        else {
+            return; // skip if port unavailable
+        };
+
+        // First connection from localhost: should be accepted.
+        let Ok(mut conn1) = tokio::net::TcpStream::connect(addr).await else {
+            let _ = shutdown_tx.send(true);
+            return;
+        };
+
+        // Send a valid octet-counted frame on conn1.
+        if conn1.write_all(b"5 hello").await.is_err() {
+            let _ = shutdown_tx.send(true);
+            return;
+        }
+
+        // We must receive that message.
+        let received = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await;
+        assert!(
+            matches!(received, Ok(Some(_))),
+            "should receive message from conn1"
+        );
+
+        // Second connection from same IP while conn1 is alive — should be rejected.
+        if let Ok(mut c2) = tokio::net::TcpStream::connect(addr).await {
+            let _ = c2.write_all(b"5 world").await;
+            let received2 = tokio::time::timeout(Duration::from_millis(300), rx.recv()).await;
+            assert!(
+                received2.is_err(),
+                "second connection from same IP should be rejected"
+            );
+        }
+
+        // Drop conn1, then a new connection should be accepted (guard decrements count).
+        drop(conn1);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        if let Ok(mut c3) = tokio::net::TcpStream::connect(addr).await {
+            if c3.write_all(b"5 after").await.is_ok() {
+                let received3 =
+                    tokio::time::timeout(Duration::from_secs(2), rx.recv()).await;
+                assert!(
+                    matches!(received3, Ok(Some(_))),
+                    "connection after previous close should be accepted"
+                );
+            }
         }
 
         let _ = shutdown_tx.send(true);

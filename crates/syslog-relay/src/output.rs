@@ -197,6 +197,44 @@ impl Output for FileOutput {
     }
 }
 
+/// An output that writes serialized RFC 5424 syslog messages to stdout.
+///
+/// Each message is serialized to wire format and written as a single line.
+#[derive(Debug, Clone)]
+pub struct ConsoleOutput {
+    name: String,
+}
+
+impl ConsoleOutput {
+    /// Create a new `ConsoleOutput` with the given name.
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+}
+
+impl Output for ConsoleOutput {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn send(&self, message: SyslogMessage) -> Result<(), RelayError> {
+        let mut wire = syslog_parse::rfc5424::serializer::serialize(&message);
+        wire.push(b'\n');
+
+        let mut stdout = tokio::io::stdout();
+        stdout.write_all(&wire).await.map_err(|e| {
+            warn!(output = %self.name, "failed to write to stdout: {e}");
+            RelayError::OutputSendFailed {
+                output: self.name.clone(),
+                reason: format!("write to stdout: {e}"),
+            }
+        })?;
+
+        Ok(())
+    }
+}
+
 /// A ring-buffer output that stores the last N messages in memory.
 ///
 /// When the buffer reaches capacity, the oldest message is dropped
@@ -434,5 +472,11 @@ mod tests {
     async fn buffer_output_name() {
         let output = BufferOutput::new("my-buffer", 10);
         assert_eq!(output.name(), "my-buffer");
+    }
+
+    #[test]
+    fn console_output_name() {
+        let output = ConsoleOutput::new("my-console");
+        assert_eq!(output.name(), "my-console");
     }
 }

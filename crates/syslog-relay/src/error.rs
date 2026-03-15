@@ -24,8 +24,15 @@ pub enum RelayError {
     },
 
     /// The pipeline has been shut down.
+    ///
+    /// Carries the serialized replay detector state (if a verification
+    /// stage was configured) so the caller can persist it to disk.
     #[error("pipeline shutdown")]
-    Shutdown,
+    Shutdown {
+        /// Serialized replay-detector state, or `None` when no verification
+        /// stage is present.
+        replay_state: Option<String>,
+    },
 
     /// A channel was closed unexpectedly.
     #[error("channel closed: {0}")]

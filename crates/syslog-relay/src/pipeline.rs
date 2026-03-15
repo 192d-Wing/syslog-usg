@@ -226,6 +226,16 @@ impl<O: Output> Pipeline<O> {
         }
     }
 
+    /// Serialize the replay detector state, if a verification stage is configured.
+    ///
+    /// Returns `None` if no verification stage is present.
+    #[must_use]
+    pub fn replay_state(&self) -> Option<String> {
+        self.verification
+            .as_ref()
+            .map(|v| v.serialize_replay_state())
+    }
+
     /// Run the pipeline until shutdown is signaled or the ingress channel closes.
     ///
     /// This is the main processing loop. It will:
@@ -236,7 +246,8 @@ impl<O: Output> Pipeline<O> {
     /// 5. Route to selected outputs (or fan-out to all)
     ///
     /// # Errors
-    /// Returns `RelayError::Shutdown` when the pipeline is shut down.
+    /// Returns `RelayError::Shutdown` (carrying any replay-detector state)
+    /// when the pipeline is shut down.
     pub async fn run(mut self) -> Result<(), RelayError> {
         info!("pipeline started with {} output(s)", self.outputs.len());
 
@@ -255,13 +266,14 @@ impl<O: Output> Pipeline<O> {
                     if result.is_err() || *self.shutdown.borrow() {
                         self.flush_signing_to_all().await;
 
+                        let replay_state = self.replay_state();
                         info!(
                             processed = messages_processed,
                             filtered = messages_filtered,
                             rejected = messages_rejected,
                             "pipeline shutting down"
                         );
-                        return Err(RelayError::Shutdown);
+                        return Err(RelayError::Shutdown { replay_state });
                     }
                 }
 
@@ -472,7 +484,7 @@ mod tests {
         shutdown.shutdown();
         let result = handle.await;
         assert!(result.is_ok());
-        if let Ok(Err(RelayError::Shutdown)) = result {
+        if let Ok(Err(RelayError::Shutdown { .. })) = result {
             // expected
         } else {
             // The pipeline should have returned Shutdown error

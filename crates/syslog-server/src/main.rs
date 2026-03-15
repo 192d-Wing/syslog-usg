@@ -25,7 +25,7 @@ use syslog_observe::{
 };
 use syslog_relay::output::Output;
 use syslog_relay::{
-    AlarmFilter, BufferOutput, FileOutput, MessageFilter, NonAlarmPolicy, Pipeline,
+    AlarmFilter, BufferOutput, ConsoleOutput, FileOutput, MessageFilter, NonAlarmPolicy, Pipeline,
     PipelineIngress, RelayError, RoutingRule, RoutingTable,
 };
 use syslog_transport::dtls::{DtlsDatagram, DtlsListenerConfig, run_dtls_listener};
@@ -42,6 +42,7 @@ enum ServerOutput {
     Network(NetworkOutput),
     File(FileOutput),
     Buffer(BufferOutput),
+    Console(ConsoleOutput),
 }
 
 impl Output for ServerOutput {
@@ -50,6 +51,7 @@ impl Output for ServerOutput {
             Self::Network(o) => o.name(),
             Self::File(o) => o.name(),
             Self::Buffer(o) => o.name(),
+            Self::Console(o) => o.name(),
         }
     }
 
@@ -58,6 +60,7 @@ impl Output for ServerOutput {
             Self::Network(o) => o.send(message).await,
             Self::File(o) => o.send(message).await,
             Self::Buffer(o) => o.send(message).await,
+            Self::Console(o) => o.send(message).await,
         }
     }
 }
@@ -151,10 +154,24 @@ async fn main() {
     );
     pipeline.set_signing_fail_open(config.pipeline.signing_fail_open);
 
-    // Start the relay pipeline
+    // Capture the replay-state persistence path before config borrows diverge.
+    let replay_state_path: Option<String> = config
+        .verification
+        .as_ref()
+        .and_then(|v| v.state_path.clone());
+
+    // Start the relay pipeline — return replay-detector state on shutdown.
     let pipeline_handle = tokio::spawn(async move {
-        if let Err(e) = pipeline.run().await {
-            info!("pipeline stopped: {e}");
+        match pipeline.run().await {
+            Ok(()) => None,
+            Err(RelayError::Shutdown { replay_state }) => {
+                info!("pipeline stopped: shutdown");
+                replay_state
+            }
+            Err(e) => {
+                info!("pipeline stopped: {e}");
+                None
+            }
         }
     });
 
@@ -222,13 +239,31 @@ async fn main() {
 
     // Wait for drain timeout
     let drain_timeout = std::time::Duration::from_secs(config.server.drain_timeout_seconds);
-    let _ = tokio::time::timeout(drain_timeout, async {
-        let _ = pipeline_handle.await;
+    let pipeline_result = tokio::time::timeout(drain_timeout, async {
+        let replay_state: Option<String> = pipeline_handle.await.unwrap_or_default();
         for handle in listener_handles {
             let _ = handle.await;
         }
+        replay_state
     })
     .await;
+
+    // Persist replay-detector state to disk if configured.
+    if let Some(ref path) = replay_state_path {
+        let state = match pipeline_result {
+            Ok(s) => s,
+            Err(_) => {
+                warn!("drain timeout expired before pipeline returned replay state");
+                None
+            }
+        };
+        if let Some(data) = state {
+            match std::fs::write(path, &data) {
+                Ok(()) => info!(path = %path, "persisted replay detector state"),
+                Err(e) => error!(path = %path, error = %e, "failed to persist replay detector state"),
+            }
+        }
+    }
 
     // Health server doesn't need graceful shutdown
     health_handle.abort();
@@ -308,7 +343,17 @@ fn build_routing_table(
             syslog_config::model::ActionTypeConfig::Remote { .. } => {
                 (0..network_output_count).collect()
             }
-            syslog_config::model::ActionTypeConfig::Console => (0..network_output_count).collect(),
+            syslog_config::model::ActionTypeConfig::Console => {
+                let console_output = ConsoleOutput::new(format!("console-action-{i}"));
+                let idx = outputs.len();
+                outputs.push(ServerOutput::Console(console_output));
+                info!(
+                    action_index = i,
+                    output_index = idx,
+                    "console output configured from management action"
+                );
+                vec![idx]
+            }
             syslog_config::model::ActionTypeConfig::Discard => {
                 vec![]
             }
@@ -514,6 +559,7 @@ fn start_listeners(
                     max_frame_size: config.pipeline.max_message_size,
                     tls_acceptor,
                     max_connections: listener_cfg.max_connections,
+                    max_connections_per_ip: listener_cfg.max_connections_per_ip,
                     read_timeout: listener_cfg
                         .read_timeout_secs
                         .map(std::time::Duration::from_secs),

@@ -103,6 +103,12 @@ pub struct ListenerConfig {
     #[serde(default = "default_max_connections")]
     pub max_connections: Option<usize>,
 
+    /// Maximum concurrent connections from a single source IP for TCP/TLS.
+    /// When exceeded, new connections from that IP are rejected.
+    /// Default: None (unlimited per-IP).
+    #[serde(default)]
+    pub max_connections_per_ip: Option<usize>,
+
     /// Per-frame read timeout in seconds for TCP/TLS listeners.
     /// Defaults to 30 seconds when not specified.
     #[serde(default = "default_read_timeout_secs")]

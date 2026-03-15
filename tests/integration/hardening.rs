@@ -140,6 +140,7 @@ impl TcpTestHarness {
             max_frame_size: 64 * 1024,
             tls_acceptor: None,
             max_connections: Some(16),
+            max_connections_per_ip: None,
             read_timeout: Some(Duration::from_secs(5)),
             idle_timeout: Some(Duration::from_secs(10)),
         };
