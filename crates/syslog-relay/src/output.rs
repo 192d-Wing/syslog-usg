@@ -4,6 +4,7 @@
 //! syslog messages to their destination (e.g., a remote syslog server,
 //! a file, or a test collector).
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -196,6 +197,60 @@ impl Output for FileOutput {
     }
 }
 
+/// A ring-buffer output that stores the last N messages in memory.
+///
+/// When the buffer reaches capacity, the oldest message is dropped
+/// to make room for the new one (FIFO ring buffer). Thread-safe via
+/// an internal `Arc<Mutex<VecDeque<SyslogMessage>>>`.
+#[derive(Debug, Clone)]
+pub struct BufferOutput {
+    name: String,
+    buffer: Arc<Mutex<VecDeque<SyslogMessage>>>,
+    capacity: usize,
+}
+
+impl BufferOutput {
+    /// Create a new `BufferOutput` with the given name and capacity.
+    #[must_use]
+    pub fn new(name: impl Into<String>, capacity: usize) -> Self {
+        Self {
+            name: name.into(),
+            buffer: Arc::new(Mutex::new(VecDeque::with_capacity(capacity))),
+            capacity,
+        }
+    }
+
+    /// Returns a snapshot of the current buffer contents.
+    pub async fn snapshot(&self) -> Vec<SyslogMessage> {
+        self.buffer.lock().await.iter().cloned().collect()
+    }
+
+    /// Returns the number of messages currently in the buffer.
+    pub async fn len(&self) -> usize {
+        self.buffer.lock().await.len()
+    }
+
+    /// Returns `true` if the buffer is empty.
+    pub async fn is_empty(&self) -> bool {
+        self.buffer.lock().await.is_empty()
+    }
+}
+
+impl Output for BufferOutput {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn send(&self, message: SyslogMessage) -> Result<(), RelayError> {
+        let mut guard = self.buffer.lock().await;
+        if guard.len() >= self.capacity {
+            guard.pop_front();
+        }
+        guard.push_back(message);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,5 +369,66 @@ mod tests {
     async fn file_output_name() {
         let output = FileOutput::new("my-file", "/tmp/dummy.log");
         assert_eq!(output.name(), "my-file");
+    }
+
+    #[tokio::test]
+    async fn buffer_output_stores_messages() {
+        let output = BufferOutput::new("buf", 3);
+        assert!(output.is_empty().await);
+
+        let _ = output.send(make_message(b"msg1")).await;
+        let _ = output.send(make_message(b"msg2")).await;
+        let _ = output.send(make_message(b"msg3")).await;
+
+        assert_eq!(output.len().await, 3);
+
+        let snap = output.snapshot().await;
+        assert_eq!(snap.len(), 3);
+        assert_eq!(
+            snap.first().and_then(|m| m.msg.as_ref()).map(|b| b.as_ref()),
+            Some(b"msg1".as_slice())
+        );
+        assert_eq!(
+            snap.get(1).and_then(|m| m.msg.as_ref()).map(|b| b.as_ref()),
+            Some(b"msg2".as_slice())
+        );
+        assert_eq!(
+            snap.get(2).and_then(|m| m.msg.as_ref()).map(|b| b.as_ref()),
+            Some(b"msg3".as_slice())
+        );
+    }
+
+    #[tokio::test]
+    async fn buffer_output_drops_oldest_when_full() {
+        let output = BufferOutput::new("buf", 3);
+
+        let _ = output.send(make_message(b"msg1")).await;
+        let _ = output.send(make_message(b"msg2")).await;
+        let _ = output.send(make_message(b"msg3")).await;
+        let _ = output.send(make_message(b"msg4")).await;
+
+        assert_eq!(output.len().await, 3);
+
+        let snap = output.snapshot().await;
+        assert_eq!(snap.len(), 3);
+        // Oldest (msg1) should have been dropped
+        assert_eq!(
+            snap.first().and_then(|m| m.msg.as_ref()).map(|b| b.as_ref()),
+            Some(b"msg2".as_slice())
+        );
+        assert_eq!(
+            snap.get(1).and_then(|m| m.msg.as_ref()).map(|b| b.as_ref()),
+            Some(b"msg3".as_slice())
+        );
+        assert_eq!(
+            snap.get(2).and_then(|m| m.msg.as_ref()).map(|b| b.as_ref()),
+            Some(b"msg4".as_slice())
+        );
+    }
+
+    #[tokio::test]
+    async fn buffer_output_name() {
+        let output = BufferOutput::new("my-buffer", 10);
+        assert_eq!(output.name(), "my-buffer");
     }
 }

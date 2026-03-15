@@ -254,6 +254,9 @@ fn validate(config: &ServerConfig) -> Result<(), ConfigError> {
                     .to_owned(),
             ));
         }
+        if let Some(ref sp) = verification.state_path {
+            validate_path(sp, "verification.state_path")?;
+        }
     }
 
     // Management action validation (RFC 9742).

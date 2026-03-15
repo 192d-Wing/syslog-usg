@@ -228,6 +228,53 @@ impl ReplayDetector {
     pub fn reset(&mut self) {
         self.seen.clear();
     }
+
+    /// Serialize the detector state to a simple text format for persistence.
+    ///
+    /// Format: one line per RSID, `"RSID GBC\n"`.
+    #[must_use]
+    pub fn serialize_state(&self) -> String {
+        use std::fmt::Write;
+        let mut out = String::new();
+        for (rsid, gbc) in &self.seen {
+            let _ = writeln!(out, "{rsid} {gbc}");
+        }
+        out
+    }
+
+    /// Load state from the serialized text format produced by [`serialize_state`].
+    ///
+    /// Ignores malformed lines (logs a warning via `tracing`).
+    pub fn load_state(&mut self, data: &str) {
+        for line in data.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let mut parts = line.split_whitespace();
+            let rsid = match parts.next().and_then(|s| s.parse::<u64>().ok()) {
+                Some(v) => v,
+                None => {
+                    tracing::warn!(
+                        line = %line,
+                        "replay state: skipping malformed line (bad RSID)"
+                    );
+                    continue;
+                }
+            };
+            let gbc = match parts.next().and_then(|s| s.parse::<u64>().ok()) {
+                Some(v) => v,
+                None => {
+                    tracing::warn!(
+                        line = %line,
+                        "replay state: skipping malformed line (bad GBC)"
+                    );
+                    continue;
+                }
+            };
+            let _prev = self.seen.insert(rsid, gbc);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -430,6 +477,77 @@ mod tests {
 
         // After reset, same GBC should be accepted again
         assert!(detector.check(&block).is_ok());
+    }
+
+    // -- serialize / load state tests --
+
+    #[test]
+    fn serialize_state_roundtrip() {
+        let mut detector = ReplayDetector::new();
+        let block_a = make_test_block(100, 42);
+        let block_b = make_test_block(200, 99);
+        assert!(detector.check(&block_a).is_ok());
+        assert!(detector.check(&block_b).is_ok());
+
+        let serialized = detector.serialize_state();
+
+        let mut detector2 = ReplayDetector::new();
+        detector2.load_state(&serialized);
+
+        // detector2 should reject the same GBC values (they were already seen)
+        assert!(detector2.check(&block_a).is_err());
+        assert!(detector2.check(&block_b).is_err());
+
+        // But higher GBC values should pass
+        let block_a2 = make_test_block(100, 43);
+        let block_b2 = make_test_block(200, 100);
+        assert!(detector2.check(&block_a2).is_ok());
+        assert!(detector2.check(&block_b2).is_ok());
+    }
+
+    #[test]
+    fn serialize_state_empty() {
+        let detector = ReplayDetector::new();
+        let serialized = detector.serialize_state();
+        assert!(serialized.is_empty());
+
+        // Loading empty string should be a no-op
+        let mut detector2 = ReplayDetector::new();
+        detector2.load_state(&serialized);
+        // Should accept any block
+        let block = make_test_block(1, 1);
+        assert!(detector2.check(&block).is_ok());
+    }
+
+    #[test]
+    fn load_state_ignores_malformed_lines() {
+        let mut detector = ReplayDetector::new();
+        let data = "100 42\nbad_line\n200\n300 abc\n400 50\n";
+        detector.load_state(data);
+
+        // Only 100->42 and 400->50 should have been loaded
+        let block100 = make_test_block(100, 42);
+        assert!(detector.check(&block100).is_err()); // already seen
+
+        let block400 = make_test_block(400, 50);
+        assert!(detector.check(&block400).is_err()); // already seen
+
+        // 200 and 300 were not loaded, so any GBC should work
+        let block200 = make_test_block(200, 1);
+        assert!(detector.check(&block200).is_ok());
+    }
+
+    #[test]
+    fn load_state_handles_whitespace() {
+        let mut detector = ReplayDetector::new();
+        let data = "  100   42  \n\n  \n200 99\n";
+        detector.load_state(data);
+
+        let block100 = make_test_block(100, 42);
+        assert!(detector.check(&block100).is_err());
+
+        let block200 = make_test_block(200, 99);
+        assert!(detector.check(&block200).is_err());
     }
 
     fn make_test_block(rsid: u64, gbc: u64) -> SignatureBlock {

@@ -25,8 +25,8 @@ use syslog_observe::{
 };
 use syslog_relay::output::Output;
 use syslog_relay::{
-    AlarmFilter, FileOutput, MessageFilter, NonAlarmPolicy, Pipeline, PipelineIngress, RelayError,
-    RoutingRule, RoutingTable,
+    AlarmFilter, BufferOutput, FileOutput, MessageFilter, NonAlarmPolicy, Pipeline,
+    PipelineIngress, RelayError, RoutingRule, RoutingTable,
 };
 use syslog_transport::dtls::{DtlsDatagram, DtlsListenerConfig, run_dtls_listener};
 use syslog_transport::tcp::{TcpListenerConfig, TcpMessage, run_tcp_listener};
@@ -41,6 +41,7 @@ use crate::network_output::NetworkOutput;
 enum ServerOutput {
     Network(NetworkOutput),
     File(FileOutput),
+    Buffer(BufferOutput),
 }
 
 impl Output for ServerOutput {
@@ -48,6 +49,7 @@ impl Output for ServerOutput {
         match self {
             Self::Network(o) => o.name(),
             Self::File(o) => o.name(),
+            Self::Buffer(o) => o.name(),
         }
     }
 
@@ -55,6 +57,7 @@ impl Output for ServerOutput {
         match self {
             Self::Network(o) => o.send(message).await,
             Self::File(o) => o.send(message).await,
+            Self::Buffer(o) => o.send(message).await,
         }
     }
 }
@@ -209,7 +212,7 @@ async fn main() {
     info!("syslog-usg ready");
 
     // Wait for shutdown or reload signals
-    wait_for_signals(&cli.config, &log_reload).await;
+    wait_for_signals(&cli.config, &log_reload, &config).await;
 
     // Initiate graceful shutdown
     info!("initiating graceful shutdown");
@@ -321,12 +324,19 @@ fn build_routing_table(
                 );
                 vec![idx]
             }
-            syslog_config::model::ActionTypeConfig::Buffer { .. } => {
+            syslog_config::model::ActionTypeConfig::Buffer { name, size } => {
+                let buffer_output =
+                    BufferOutput::new(format!("buffer-action-{i}-{name}"), *size);
+                let idx = outputs.len();
+                outputs.push(ServerOutput::Buffer(buffer_output));
                 info!(
                     action_index = i,
-                    "buffer action type is not yet implemented"
+                    name = %name,
+                    size = size,
+                    output_index = idx,
+                    "buffer output configured from management action"
                 );
-                continue;
+                vec![idx]
             }
         };
 
@@ -757,6 +767,32 @@ fn build_verification_stage(config: &ServerConfig) -> Option<syslog_relay::Verif
 
     let stage = syslog_relay::VerificationStage::new(verifiers, verif_cfg.reject_unverified);
 
+    // Load persisted replay detector state if configured.
+    if let Some(ref state_path) = verif_cfg.state_path {
+        match std::fs::read_to_string(state_path) {
+            Ok(data) => {
+                stage.load_replay_state(&data);
+                info!(
+                    path = %state_path,
+                    "loaded persisted replay detector state"
+                );
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                debug!(
+                    path = %state_path,
+                    "no persisted replay detector state file found, starting fresh"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    path = %state_path,
+                    error = %e,
+                    "failed to read replay detector state file, starting fresh"
+                );
+            }
+        }
+    }
+
     info!(
         keys = stage.verifier_count(),
         reject_unverified = verif_cfg.reject_unverified,
@@ -999,12 +1035,17 @@ fn build_outputs(config: &ServerConfig) -> Vec<ServerOutput> {
 /// Wait for shutdown (SIGINT/SIGTERM) or reload (SIGHUP) signals.
 ///
 /// On SIGHUP: re-reads the config file and applies runtime-reloadable
-/// settings (currently: log level). Listener and output changes are logged
+/// settings (log level). Changes to listeners, outputs, pipeline, signing,
+/// verification, metrics, and management actions are detected and logged
 /// but require a full restart to take effect.
 ///
 /// On SIGINT/SIGTERM: returns so the caller can proceed with graceful shutdown.
 #[cfg(unix)]
-async fn wait_for_signals(config_path: &std::path::Path, log_reload: &LogReloadHandle) {
+async fn wait_for_signals(
+    config_path: &std::path::Path,
+    log_reload: &LogReloadHandle,
+    current_config: &ServerConfig,
+) {
     use tokio::signal::unix::{SignalKind, signal};
 
     let mut sighup = match signal(SignalKind::hangup()) {
@@ -1028,7 +1069,7 @@ async fn wait_for_signals(config_path: &std::path::Path, log_reload: &LogReloadH
             }
             _ = sighup.recv() => {
                 info!("received SIGHUP — reloading configuration");
-                reload_config(config_path, log_reload);
+                reload_config(config_path, log_reload, current_config);
             }
         }
     }
@@ -1036,7 +1077,11 @@ async fn wait_for_signals(config_path: &std::path::Path, log_reload: &LogReloadH
 
 /// Fallback for non-Unix platforms: just wait for ctrl-c.
 #[cfg(not(unix))]
-async fn wait_for_signals(_config_path: &std::path::Path, _log_reload: &LogReloadHandle) {
+async fn wait_for_signals(
+    _config_path: &std::path::Path,
+    _log_reload: &LogReloadHandle,
+    _current_config: &ServerConfig,
+) {
     match tokio::signal::ctrl_c().await {
         Ok(()) => info!("received shutdown signal"),
         Err(e) => error!("failed to listen for shutdown signal: {e}"),
@@ -1044,8 +1089,18 @@ async fn wait_for_signals(_config_path: &std::path::Path, _log_reload: &LogReloa
 }
 
 /// Re-read the config file and apply runtime-reloadable settings.
-fn reload_config(config_path: &std::path::Path, log_reload: &LogReloadHandle) {
-    let config = match syslog_config::load_config(config_path) {
+///
+/// Currently reloadable without restart:
+/// - `logging.level`
+///
+/// All other configuration changes are detected and logged with a warning
+/// indicating that a restart is required.
+fn reload_config(
+    config_path: &std::path::Path,
+    log_reload: &LogReloadHandle,
+    current_config: &ServerConfig,
+) {
+    let new_config = match syslog_config::load_config(config_path) {
         Ok(c) => c,
         Err(e) => {
             error!(path = %config_path.display(), "config reload failed: {e}");
@@ -1053,14 +1108,49 @@ fn reload_config(config_path: &std::path::Path, log_reload: &LogReloadHandle) {
         }
     };
 
-    // Reload log level
-    match log_reload.reload_level(&config.logging.level) {
-        Ok(()) => info!(level = %config.logging.level, "log level reloaded"),
-        Err(e) => error!("failed to reload log level: {e}"),
+    // Reload log level (hot-reloadable)
+    if new_config.logging.level != current_config.logging.level {
+        match log_reload.reload_level(&new_config.logging.level) {
+            Ok(()) => info!(level = %new_config.logging.level, "log level reloaded"),
+            Err(e) => error!("failed to reload log level: {e}"),
+        }
     }
 
-    // Note: listener and output changes require a restart.
-    // Future work: hot-swap outputs, add/remove listeners.
+    // Detect changes that require a restart
+    if new_config.listeners != current_config.listeners {
+        warn!("listener configuration changed — restart required to apply");
+    }
+    if new_config.outputs != current_config.outputs {
+        warn!("output configuration changed — restart required to apply");
+    }
+    if new_config.pipeline != current_config.pipeline {
+        warn!("pipeline configuration changed — restart required to apply");
+    }
+    if new_config.signing != current_config.signing {
+        warn!("signing configuration changed — restart required to apply");
+    }
+    if new_config.verification != current_config.verification {
+        warn!("verification configuration changed — restart required to apply");
+    }
+    if new_config.metrics.bearer_token != current_config.metrics.bearer_token {
+        warn!("metrics.bearer_token changed — restart required to apply");
+    }
+    if new_config.metrics.bind_address != current_config.metrics.bind_address {
+        warn!("metrics.bind_address changed — restart required to apply");
+    }
+    if new_config.metrics.enabled != current_config.metrics.enabled {
+        warn!("metrics.enabled changed — restart required to apply");
+    }
+    if new_config.server != current_config.server {
+        warn!("server configuration changed — restart required to apply");
+    }
+    if new_config.actions != current_config.actions {
+        warn!("actions configuration changed — restart required to apply");
+    }
+    if new_config.logging.format != current_config.logging.format {
+        warn!("logging.format changed — restart required to apply");
+    }
+
     info!("configuration reloaded successfully");
 }
 

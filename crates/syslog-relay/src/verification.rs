@@ -157,6 +157,35 @@ impl VerificationStage {
         self.verifiers.len()
     }
 
+    /// Load persisted replay detector state from the serialized text format.
+    ///
+    /// See [`ReplayDetector::load_state`] for the format details.
+    pub fn load_replay_state(&self, data: &str) {
+        match self.replay_detector.lock() {
+            Ok(mut detector) => {
+                detector.load_state(data);
+                debug!("loaded persisted replay detector state");
+            }
+            Err(_) => {
+                warn!("replay detector mutex poisoned, cannot load persisted state");
+            }
+        }
+    }
+
+    /// Serialize the current replay detector state for persistence.
+    ///
+    /// See [`ReplayDetector::serialize_state`] for the format details.
+    #[must_use]
+    pub fn serialize_replay_state(&self) -> String {
+        match self.replay_detector.lock() {
+            Ok(detector) => detector.serialize_state(),
+            Err(_) => {
+                warn!("replay detector mutex poisoned, returning empty state");
+                String::new()
+            }
+        }
+    }
+
     /// Determine if a message should be forwarded based on the verification result.
     ///
     /// Returns `true` if the message should be passed through.

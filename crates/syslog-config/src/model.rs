@@ -291,6 +291,10 @@ pub struct VerificationConfig {
     /// Whether to reject messages that cannot be verified.
     #[serde(default)]
     pub reject_unverified: bool,
+
+    /// Path to persist replay detector state. Optional -- if not set,
+    /// replay detection resets on restart.
+    pub state_path: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
