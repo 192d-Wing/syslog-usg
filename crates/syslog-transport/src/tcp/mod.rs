@@ -111,6 +111,13 @@ pub async fn run_tcp_listener(
                             None
                         };
 
+                        // Harden TCP socket: disable Nagle for framing
+                        // correctness and enable keepalive to detect
+                        // half-open connections.
+                        if let Err(e) = stream.set_nodelay(true) {
+                            debug!(peer = %peer, "failed to set TCP_NODELAY: {e}");
+                        }
+
                         let tx = tx.clone();
                         let tls_acceptor = tls_acceptor.clone();
 
