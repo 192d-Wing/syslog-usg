@@ -139,11 +139,25 @@ async fn main() {
 
     // Start health/metrics HTTP server (with management state)
     let health_state = HealthState::with_management(metrics_handle, shared_state.clone());
-    let health_addr: SocketAddr = config
-        .metrics
-        .bind_address
-        .parse()
-        .unwrap_or_else(|_| ([0, 0, 0, 0], 9090).into());
+    let health_addr: SocketAddr = match config.metrics.bind_address.parse() {
+        Ok(a) => a,
+        Err(e) => {
+            error!(
+                address = %config.metrics.bind_address,
+                "invalid metrics bind address: {e} — defaulting to 127.0.0.1:9090"
+            );
+            ([127, 0, 0, 1], 9090).into()
+        }
+    };
+
+    // Warn if management/metrics endpoints are unauthenticated on non-loopback
+    if config.metrics.bearer_token.is_none() && !health_addr.ip().is_loopback() {
+        warn!(
+            addr = %health_addr,
+            "metrics/management endpoints are unauthenticated on a non-loopback address — \
+             set metrics.bearer_token in config for production use"
+        );
+    }
 
     let health_state_clone = health_state.clone();
     let bearer_token = config.metrics.bearer_token.clone();
