@@ -15,6 +15,9 @@ use crate::error::ParseError;
 const MAX_SD_ELEMENTS: usize = 128;
 /// Maximum number of SD-PARAMs per element.
 const MAX_SD_PARAMS: usize = 64;
+/// Maximum length of a single PARAM-VALUE in bytes.
+/// Prevents unbounded heap allocation from attacker-controlled input.
+const MAX_PARAM_VALUE_LENGTH: usize = 8192;
 
 /// Parse the STRUCTURED-DATA portion of an RFC 5424 message.
 ///
@@ -239,6 +242,15 @@ fn parse_param_value(input: &[u8], pos: &mut usize) -> Result<String, ParseError
                 context: "PARAM-VALUE close quote",
             })?;
             return Ok(value);
+        }
+
+        // Enforce maximum PARAM-VALUE length to prevent unbounded allocation
+        if value.len() >= MAX_PARAM_VALUE_LENGTH {
+            return Err(ParseError::FieldTooLong {
+                field: "PARAM-VALUE",
+                max: MAX_PARAM_VALUE_LENGTH,
+                actual: value.len().saturating_add(1),
+            });
         }
 
         if b == b'\\' {
