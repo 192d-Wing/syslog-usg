@@ -54,4 +54,4 @@ pub use error::SignError;
 pub use signature::{SigningKey, VerifyingKey};
 pub use signer::{Signer, SignerConfig};
 pub use types::{HashAlgorithm, KeyBlobType, SignatureGroup, SignatureScheme, Ver};
-pub use verifier::Verifier;
+pub use verifier::{ReplayDetector, Verifier};

@@ -2,6 +2,14 @@
 //!
 //! The [`Verifier`] checks that signature blocks are correctly signed
 //! and that the hash chain matches the original messages.
+//!
+//! # Replay Protection
+//!
+//! RFC 5848 §5.3.2.2 requires that verifiers track the Global Block Counter
+//! (GBC) per Reboot Session ID (RSID) to detect replayed signature blocks.
+//! Use [`ReplayDetector`] to enforce GBC monotonicity.
+
+use std::collections::HashMap;
 
 use crate::blocks::SignatureBlock;
 use crate::encode::encode_hash_block;
@@ -117,6 +125,81 @@ impl Verifier {
 /// Format bytes as hex string for error messages.
 fn hex_string(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+// ---------------------------------------------------------------------------
+// Replay Detection
+// ---------------------------------------------------------------------------
+
+/// Tracks GBC values per RSID to detect replayed signature blocks.
+///
+/// RFC 5848 §5.3.2.2: The verifier MUST track the GBC per RSID and reject
+/// signature blocks with a GBC that is not strictly monotonically increasing.
+///
+/// # Usage
+///
+/// Call [`check`](ReplayDetector::check) before accepting a signature block.
+/// Returns `Ok(())` if the block's GBC is fresh (higher than any previously
+/// seen GBC for that RSID), or `Err` if the block appears to be a replay.
+#[derive(Debug, Default)]
+pub struct ReplayDetector {
+    /// Maps RSID → highest GBC seen for that session.
+    seen: HashMap<u64, u64>,
+    /// Maximum number of tracked RSIDs to bound memory usage.
+    max_sessions: usize,
+}
+
+impl ReplayDetector {
+    /// Create a new replay detector with a default session limit.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            seen: HashMap::new(),
+            max_sessions: 4096,
+        }
+    }
+
+    /// Create a new replay detector with a custom maximum session count.
+    #[must_use]
+    pub fn with_max_sessions(max_sessions: usize) -> Self {
+        Self {
+            seen: HashMap::new(),
+            max_sessions,
+        }
+    }
+
+    /// Check whether a signature block's GBC is fresh for its RSID.
+    ///
+    /// If the GBC is higher than any previously seen value for the given RSID,
+    /// the detector records it and returns `Ok(())`. Otherwise, returns an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SignError::VerificationFailed`] if the block appears replayed
+    /// (GBC is not strictly greater than the last seen value for this RSID).
+    pub fn check(&mut self, block: &SignatureBlock) -> Result<(), SignError> {
+        if let Some(&last_gbc) = self.seen.get(&block.rsid) {
+            if block.gbc <= last_gbc {
+                return Err(SignError::VerificationFailed(format!(
+                    "replay detected: GBC {} for RSID {} is not greater than last seen {}",
+                    block.gbc, block.rsid, last_gbc
+                )));
+            }
+        }
+
+        // Evict oldest session if at capacity (simple strategy: clear all)
+        if self.seen.len() >= self.max_sessions && !self.seen.contains_key(&block.rsid) {
+            self.seen.clear();
+        }
+
+        let _prev = self.seen.insert(block.rsid, block.gbc);
+        Ok(())
+    }
+
+    /// Reset the detector, clearing all tracked state.
+    pub fn reset(&mut self) {
+        self.seen.clear();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -255,6 +338,84 @@ mod tests {
             assert_eq!(block.cnt, 1);
             assert!(verifier.verify_block(block).is_ok());
             assert!(verifier.verify_messages(block, &[b"only_one"]).is_ok());
+        }
+    }
+
+    // -- ReplayDetector tests --
+
+    #[test]
+    fn replay_detector_accepts_increasing_gbc() {
+        let mut detector = ReplayDetector::new();
+        let mut block = make_test_block(1, 1);
+        assert!(detector.check(&block).is_ok());
+
+        block.gbc = 2;
+        assert!(detector.check(&block).is_ok());
+
+        block.gbc = 10;
+        assert!(detector.check(&block).is_ok());
+    }
+
+    #[test]
+    fn replay_detector_rejects_duplicate_gbc() {
+        let mut detector = ReplayDetector::new();
+        let block = make_test_block(1, 5);
+        assert!(detector.check(&block).is_ok());
+
+        // Same GBC again — replay
+        assert!(detector.check(&block).is_err());
+    }
+
+    #[test]
+    fn replay_detector_rejects_lower_gbc() {
+        let mut detector = ReplayDetector::new();
+        let mut block = make_test_block(1, 10);
+        assert!(detector.check(&block).is_ok());
+
+        block.gbc = 5; // Lower — replay
+        assert!(detector.check(&block).is_err());
+    }
+
+    #[test]
+    fn replay_detector_tracks_per_rsid() {
+        let mut detector = ReplayDetector::new();
+        let block_a = make_test_block(1, 5);
+        let block_b = make_test_block(2, 3);
+        assert!(detector.check(&block_a).is_ok());
+        assert!(detector.check(&block_b).is_ok());
+
+        // Advance RSID 1 — should work
+        let block_a2 = make_test_block(1, 6);
+        assert!(detector.check(&block_a2).is_ok());
+
+        // Replay RSID 2 — should fail
+        assert!(detector.check(&block_b).is_err());
+    }
+
+    #[test]
+    fn replay_detector_reset() {
+        let mut detector = ReplayDetector::new();
+        let block = make_test_block(1, 5);
+        assert!(detector.check(&block).is_ok());
+
+        detector.reset();
+
+        // After reset, same GBC should be accepted again
+        assert!(detector.check(&block).is_ok());
+    }
+
+    fn make_test_block(rsid: u64, gbc: u64) -> SignatureBlock {
+        use crate::types::{HashAlgorithm, SignatureScheme, Ver};
+        SignatureBlock {
+            ver: Ver::new(HashAlgorithm::Sha256, SignatureScheme::EcdsaP256),
+            rsid,
+            sg: crate::types::SignatureGroup::Global,
+            spri: 0,
+            gbc,
+            fmn: 1,
+            cnt: 0,
+            hashes: vec![],
+            signature: vec![],
         }
     }
 }
