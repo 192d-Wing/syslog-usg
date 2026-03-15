@@ -412,6 +412,15 @@ fn validate(config: &ServerConfig) -> Result<(), ConfigError> {
         }
     }
 
+    // Metrics TLS validation.
+    if let Some(ref tls) = config.metrics.tls {
+        validate_path(&tls.cert_path, "metrics.tls.cert_path")?;
+        validate_path(&tls.key_path, "metrics.tls.key_path")?;
+        if let Some(ref ca) = tls.ca_path {
+            validate_path(ca, "metrics.tls.ca_path")?;
+        }
+    }
+
     Ok(())
 }
 

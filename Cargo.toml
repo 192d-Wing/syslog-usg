@@ -76,6 +76,7 @@ clap = { version = "4", features = ["derive"] }
 # HTTP admin server
 axum = "0.8"
 hyper = "1"
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "service"] }
 tower = "0.5"
 
 # Benchmarks

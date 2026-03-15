@@ -345,6 +345,11 @@ pub struct VerificationConfig {
     /// Path to persist replay detector state. Optional -- if not set,
     /// replay detection resets on restart.
     pub state_path: Option<String>,
+
+    /// Maximum number of RSID sessions tracked by the replay detector.
+    /// When the table is full, the session with the lowest GBC is evicted.
+    /// Defaults to 4096.
+    pub max_replay_sessions: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -405,6 +410,11 @@ pub struct MetricsConfig {
     /// header. Health probes (`/healthz`, `/readyz`) remain unauthenticated.
     #[serde(default)]
     pub bearer_token: Option<String>,
+
+    /// Optional TLS configuration for the metrics/management HTTP server.
+    /// When set, the endpoint serves HTTPS instead of HTTP, protecting
+    /// the bearer token in transit.
+    pub tls: Option<TlsConfig>,
 }
 
 impl std::fmt::Debug for MetricsConfig {
@@ -430,6 +440,7 @@ impl Default for MetricsConfig {
             enabled: false,
             bind_address: default_metrics_bind(),
             bearer_token: None,
+            tls: None,
         }
     }
 }

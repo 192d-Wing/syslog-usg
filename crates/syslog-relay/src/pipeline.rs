@@ -15,6 +15,10 @@ use crate::routing::RoutingTable;
 use crate::signing::SigningStage;
 use crate::verification::VerificationStage;
 
+/// Per-output channel capacity. Each output gets its own bounded channel
+/// to prevent head-of-line blocking from slow outputs.
+const PER_OUTPUT_CHANNEL_CAP: usize = 256;
+
 /// The main relay pipeline.
 ///
 /// Receives parsed syslog messages from an ingestion channel, applies
@@ -26,6 +30,8 @@ pub struct Pipeline<O: Output> {
     filters: Vec<Box<dyn MessageFilter>>,
     /// Configured outputs to send messages to.
     outputs: Vec<O>,
+    /// Per-output bounded send channels (populated on `run()`).
+    output_txs: Vec<mpsc::Sender<SyslogMessage>>,
     /// Watch channel receiver for graceful shutdown.
     shutdown: watch::Receiver<bool>,
     /// Optional RFC 5848 signing stage.
@@ -45,7 +51,7 @@ impl<O: Output> std::fmt::Debug for Pipeline<O> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Pipeline")
             .field("filters", &self.filters)
-            .field("outputs", &self.outputs)
+            .field("output_count", &self.outputs.len())
             .field("signing", &self.signing)
             .field("verification", &self.verification)
             .field("routing_table", &self.routing_table)
@@ -148,6 +154,7 @@ impl<O: Output> Pipeline<O> {
             rx,
             filters,
             outputs,
+            output_txs: Vec::new(), // populated in run()
             shutdown: shutdown_rx,
             signing,
             verification,
@@ -172,54 +179,43 @@ impl<O: Output> Pipeline<O> {
 
     /// Send a message to all outputs (fan-out mode).
     ///
-    /// Sends are sequential per output. If head-of-line blocking from a slow
-    /// output becomes an issue, consider isolating outputs behind per-output
-    /// bounded channels with dedicated send tasks.
-    async fn send_to_all_outputs(&self, messages: &[SyslogMessage]) {
+    /// Uses `try_send` to avoid head-of-line blocking: each output has its
+    /// own bounded channel with a dedicated send task, so a slow output
+    /// cannot stall delivery to other outputs.
+    fn send_to_all_outputs(&self, messages: &[SyslogMessage]) {
         for out_msg in messages {
-            for output in &self.outputs {
-                if let Err(e) = output.send(out_msg.clone()).await {
-                    warn!(
-                        output = output.name(),
-                        error = %e,
-                        "failed to send message to output"
-                    );
+            for tx in &self.output_txs {
+                if let Err(mpsc::error::TrySendError::Full(_)) = tx.try_send(out_msg.clone()) {
+                    metrics::counter!("relay_output_drops_total").increment(1);
+                    warn!("per-output channel full, dropping message");
                 }
             }
         }
     }
 
     /// Send a message to selected outputs based on the routing table.
-    async fn send_to_routed_outputs(&self, messages: &[SyslogMessage], output_indices: &[usize]) {
+    fn send_to_routed_outputs(&self, messages: &[SyslogMessage], output_indices: &[usize]) {
         for out_msg in messages {
             for &idx in output_indices {
-                if let Some(output) = self.outputs.get(idx) {
-                    if let Err(e) = output.send(out_msg.clone()).await {
-                        warn!(
-                            output = output.name(),
-                            error = %e,
-                            "failed to send message to routed output"
-                        );
+                if let Some(tx) = self.output_txs.get(idx) {
+                    if let Err(mpsc::error::TrySendError::Full(_)) = tx.try_send(out_msg.clone()) {
+                        metrics::counter!("relay_output_drops_total").increment(1);
+                        warn!("per-output channel full, dropping message");
                     }
                 }
             }
         }
     }
 
-    /// Flush signing stage and send flush messages to the given outputs.
-    async fn flush_signing_to_all(&mut self) {
+    /// Flush signing stage and send flush messages to all output channels.
+    fn flush_signing_to_all(&mut self) {
         if let Some(ref mut signing) = self.signing {
             match signing.flush() {
                 Ok(flush_msgs) => {
                     for flush_msg in &flush_msgs {
-                        for output in &self.outputs {
-                            if let Err(e) = output.send(flush_msg.clone()).await {
-                                warn!(
-                                    output = output.name(),
-                                    error = %e,
-                                    "failed to send flush message to output"
-                                );
-                            }
+                        for tx in &self.output_txs {
+                            // Best-effort: drop if channel full during flush
+                            let _ = tx.try_send(flush_msg.clone());
                         }
                     }
                 }
@@ -252,8 +248,31 @@ impl<O: Output> Pipeline<O> {
     /// # Errors
     /// Returns `RelayError::Shutdown` (carrying any replay-detector state)
     /// when the pipeline is shut down.
-    pub async fn run(mut self) -> Result<(), RelayError> {
+    pub async fn run(mut self) -> Result<(), RelayError>
+    where
+        O: Send + 'static,
+    {
         info!("pipeline started with {} output(s)", self.outputs.len());
+
+        // Spawn per-output send tasks with bounded channels to prevent
+        // head-of-line blocking from slow outputs.
+        let mut output_handles = Vec::new();
+        let outputs = std::mem::take(&mut self.outputs);
+        for output in outputs {
+            let (tx, mut rx) = mpsc::channel::<SyslogMessage>(PER_OUTPUT_CHANNEL_CAP);
+            self.output_txs.push(tx);
+            output_handles.push(tokio::spawn(async move {
+                while let Some(msg) = rx.recv().await {
+                    if let Err(e) = output.send(msg).await {
+                        warn!(
+                            output = output.name(),
+                            error = %e,
+                            "failed to send message to output"
+                        );
+                    }
+                }
+            }));
+        }
 
         let mut messages_processed: u64 = 0;
         let mut messages_filtered: u64 = 0;
@@ -268,7 +287,7 @@ impl<O: Output> Pipeline<O> {
                     // shut down the pipeline. This prevents a busy-loop when
                     // the ShutdownHandle is dropped without sending `true`.
                     if result.is_err() || *self.shutdown.borrow() {
-                        self.flush_signing_to_all().await;
+                        self.flush_signing_to_all();
 
                         let replay_state = self.replay_state();
                         info!(
@@ -277,6 +296,11 @@ impl<O: Output> Pipeline<O> {
                             rejected = messages_rejected,
                             "pipeline shutting down"
                         );
+                        // Drop senders so per-output tasks can finish
+                        self.output_txs.clear();
+                        for h in output_handles {
+                            let _ = h.await;
+                        }
                         return Err(RelayError::Shutdown { replay_state });
                     }
                 }
@@ -366,19 +390,19 @@ impl<O: Output> Pipeline<O> {
                                     if let Some(ref state) = self.shared_state {
                                         state.counters().increment_forwarded();
                                     }
-                                    self.send_to_routed_outputs(&messages_to_send, &indices).await;
+                                    self.send_to_routed_outputs(&messages_to_send, &indices);
                                 }
                             } else {
                                 // Fan out to all outputs
                                 if let Some(ref state) = self.shared_state {
                                     state.counters().increment_forwarded();
                                 }
-                                self.send_to_all_outputs(&messages_to_send).await;
+                                self.send_to_all_outputs(&messages_to_send);
                             }
                         }
                         None => {
                             // Ingress channel closed — flush signing and stop.
-                            self.flush_signing_to_all().await;
+                            self.flush_signing_to_all();
 
                             info!(
                                 processed = messages_processed,
@@ -386,6 +410,11 @@ impl<O: Output> Pipeline<O> {
                                 rejected = messages_rejected,
                                 "ingress channel closed, pipeline stopping"
                             );
+                            // Drop senders so per-output tasks can finish
+                            self.output_txs.clear();
+                            for h in output_handles {
+                                let _ = h.await;
+                            }
                             return Ok(());
                         }
                     }

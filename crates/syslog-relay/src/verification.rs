@@ -55,6 +55,19 @@ impl VerificationStage {
     /// - `reject_unverified`: If true, messages without valid signatures are rejected.
     #[must_use]
     pub fn new(verifiers: Vec<Verifier>, reject_unverified: bool) -> Self {
+        Self::with_max_sessions(verifiers, reject_unverified, 4096)
+    }
+
+    /// Create a new verification stage with a custom replay detector session limit.
+    ///
+    /// - `max_sessions`: Maximum RSID sessions tracked for replay detection.
+    ///   When full, the session with the lowest GBC is evicted.
+    #[must_use]
+    pub fn with_max_sessions(
+        verifiers: Vec<Verifier>,
+        reject_unverified: bool,
+        max_sessions: usize,
+    ) -> Self {
         if verifiers.is_empty() {
             warn!(
                 "verification stage created with no trusted keys — all signatures will fail verification"
@@ -63,7 +76,7 @@ impl VerificationStage {
         Self {
             verifiers,
             reject_unverified,
-            replay_detector: Mutex::new(ReplayDetector::new()),
+            replay_detector: Mutex::new(ReplayDetector::with_max_sessions(max_sessions)),
         }
     }
 

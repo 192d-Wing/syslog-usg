@@ -1744,6 +1744,7 @@ dependencies = [
  "bytes",
  "clap",
  "compact_str",
+ "hyper-util",
  "metrics",
  "rustls",
  "syslog-config",

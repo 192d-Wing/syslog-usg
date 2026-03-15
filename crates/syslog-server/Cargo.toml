@@ -34,3 +34,4 @@ rustls = { workspace = true }
 webpki-roots = { workspace = true }
 metrics = { workspace = true }
 base64 = { workspace = true }
+hyper-util = { workspace = true }

@@ -210,6 +210,7 @@ async fn main() {
 
     let health_state_clone = health_state.clone();
     let bearer_token = config.metrics.bearer_token.clone();
+    let metrics_tls_config = config.metrics.tls.clone();
     let health_handle = tokio::spawn(async move {
         let app = health_router_with_token(health_state_clone, bearer_token);
         let listener = match tokio::net::TcpListener::bind(health_addr).await {
@@ -219,9 +220,62 @@ async fn main() {
                 return;
             }
         };
-        info!(addr = %health_addr, "health/metrics server started");
-        if let Err(e) = axum::serve(listener, app).await {
-            error!("health server error: {e}");
+
+        if let Some(tls_cfg) = metrics_tls_config {
+            // Serve metrics over HTTPS
+            let transport_tls = syslog_transport::tls::TlsConfig {
+                cert_path: tls_cfg.cert_path.clone(),
+                key_path: tls_cfg.key_path.clone(),
+                client_auth: tls_cfg.client_auth,
+                client_ca_path: tls_cfg.ca_path.clone(),
+            };
+            let tls_server_config = match syslog_transport::tls::build_server_config(&transport_tls)
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    error!("failed to build metrics TLS config: {e}");
+                    return;
+                }
+            };
+            let tls_acceptor = tokio_rustls::TlsAcceptor::from(tls_server_config);
+            info!(addr = %health_addr, "health/metrics server started (TLS)");
+
+            loop {
+                let (stream, _peer) = match listener.accept().await {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        warn!("metrics listener accept error: {e}");
+                        continue;
+                    }
+                };
+                let acceptor = tls_acceptor.clone();
+                let app = app.clone();
+                tokio::spawn(async move {
+                    let tls_stream = match acceptor.accept(stream).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            debug!("metrics TLS handshake failed: {e}");
+                            return;
+                        }
+                    };
+                    let io = hyper_util::rt::TokioIo::new(tls_stream);
+                    let service = hyper_util::service::TowerToHyperService::new(app);
+                    if let Err(e) = hyper_util::server::conn::auto::Builder::new(
+                        hyper_util::rt::TokioExecutor::new(),
+                    )
+                    .serve_connection(io, service)
+                    .await
+                    {
+                        debug!("metrics TLS connection error: {e}");
+                    }
+                });
+            }
+        } else {
+            // Serve metrics over plaintext HTTP
+            info!(addr = %health_addr, "health/metrics server started");
+            if let Err(e) = axum::serve(listener, app).await {
+                error!("health server error: {e}");
+            }
         }
     });
 
@@ -824,7 +878,12 @@ fn build_verification_stage(config: &ServerConfig) -> Option<syslog_relay::Verif
         );
     }
 
-    let stage = syslog_relay::VerificationStage::new(verifiers, verif_cfg.reject_unverified);
+    let max_sessions = verif_cfg.max_replay_sessions.unwrap_or(4096);
+    let stage = syslog_relay::VerificationStage::with_max_sessions(
+        verifiers,
+        verif_cfg.reject_unverified,
+        max_sessions,
+    );
 
     // Load persisted replay detector state if configured.
     if let Some(ref state_path) = verif_cfg.state_path {
