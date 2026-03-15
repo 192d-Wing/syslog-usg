@@ -2,11 +2,16 @@
 //!
 //! Checks incoming messages for RFC 5848 signature blocks and verifies
 //! the cryptographic signature using configured trusted keys.
+//!
+//! Includes replay protection via [`ReplayDetector`] to enforce GBC
+//! monotonicity per RSID (RFC 5848 §5.3.2.2).
+
+use std::sync::Mutex;
 
 use syslog_proto::SyslogMessage;
 use syslog_sign::blocks::{SignatureBlock, find_ssign};
 use syslog_sign::types::SignatureScheme;
-use syslog_sign::verifier::Verifier;
+use syslog_sign::verifier::{ReplayDetector, Verifier};
 use tracing::{debug, warn};
 
 /// Result of signature verification for an incoming message.
@@ -29,6 +34,9 @@ pub struct VerificationStage {
     verifiers: Vec<Verifier>,
     /// Whether to reject messages that cannot be verified.
     reject_unverified: bool,
+    /// Replay detector — tracks GBC per RSID to reject replayed blocks.
+    /// Uses a Mutex for interior mutability since check_incoming takes &self.
+    replay_detector: Mutex<ReplayDetector>,
 }
 
 impl std::fmt::Debug for VerificationStage {
@@ -55,6 +63,7 @@ impl VerificationStage {
         Self {
             verifiers,
             reject_unverified,
+            replay_detector: Mutex::new(ReplayDetector::new()),
         }
     }
 
@@ -97,18 +106,42 @@ impl VerificationStage {
         }
 
         // Try each verifier
+        let mut sig_valid = false;
         for verifier in &self.verifiers {
             if verifier.verify_block(&sig_block).is_ok() {
-                debug!(gbc = sig_block.gbc, "signature verification passed");
-                return VerificationResult::Pass;
+                sig_valid = true;
+                break;
             }
         }
 
-        warn!(
-            gbc = sig_block.gbc,
-            "signature verification failed with all trusted keys"
-        );
-        VerificationResult::Reject
+        if !sig_valid {
+            warn!(
+                gbc = sig_block.gbc,
+                "signature verification failed with all trusted keys"
+            );
+            return VerificationResult::Reject;
+        }
+
+        // RFC 5848 §5.3.2.2: check GBC monotonicity to detect replayed blocks
+        match self.replay_detector.lock() {
+            Ok(mut detector) => {
+                if let Err(e) = detector.check(&sig_block) {
+                    warn!(
+                        gbc = sig_block.gbc,
+                        rsid = sig_block.rsid,
+                        error = %e,
+                        "signature block rejected by replay detector"
+                    );
+                    return VerificationResult::Reject;
+                }
+            }
+            Err(_) => {
+                warn!("replay detector mutex poisoned, accepting message");
+            }
+        }
+
+        debug!(gbc = sig_block.gbc, "signature verification passed");
+        VerificationResult::Pass
     }
 
     /// Whether messages that are [`VerificationResult::Unverified`] should
@@ -254,6 +287,25 @@ mod tests {
 
         let stage2 = VerificationStage::new(vec![], false);
         assert!(!stage2.reject_unverified());
+    }
+
+    #[test]
+    fn reject_replayed_signature_block() {
+        let (msg, pub_bytes) = match make_signed_message() {
+            Some(v) => v,
+            None => return,
+        };
+
+        let verifier = Verifier::new(VerifyingKey::new(pub_bytes));
+        let stage = VerificationStage::new(vec![verifier], false);
+
+        // First check should pass
+        let result1 = stage.check_incoming(&msg);
+        assert_eq!(result1, VerificationResult::Pass);
+
+        // Same message again (same GBC) should be rejected as replay
+        let result2 = stage.check_incoming(&msg);
+        assert_eq!(result2, VerificationResult::Reject);
     }
 
     #[test]
