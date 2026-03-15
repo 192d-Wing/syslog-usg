@@ -262,11 +262,20 @@ fn validate(config: &ServerConfig) -> Result<(), ConfigError> {
                 }
             }
             if let Some(ref sg) = signing.signature_group {
-                let valid = ["global", "per-pri", "pri-ranges", "custom"];
-                if !valid.contains(&sg.as_str()) {
-                    return Err(ConfigError::Validation(format!(
-                        "signing.signature_group: unknown value {sg:?}, must be one of: {valid:?}"
-                    )));
+                match sg.as_str() {
+                    "global" => {} // Only SG=0 is implemented
+                    "per-pri" | "pri-ranges" | "custom" => {
+                        return Err(ConfigError::Validation(format!(
+                            "signing.signature_group: {sg:?} is recognized but not yet \
+                             implemented; only \"global\" is currently supported"
+                        )));
+                    }
+                    _ => {
+                        return Err(ConfigError::Validation(format!(
+                            "signing.signature_group: unknown value {sg:?}, \
+                             must be one of: [\"global\", \"per-pri\", \"pri-ranges\", \"custom\"]"
+                        )));
+                    }
                 }
             }
             if let Some(0) = signing.max_hashes_per_block {
@@ -699,6 +708,33 @@ max_message_size = 0
 "#;
         let result = load_config_str(toml);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_signing_unsupported_sg_mode_rejected() {
+        let toml = r#"
+[signing]
+enabled = true
+key_path = "/etc/ssl/sign.key"
+signature_group = "per-pri"
+"#;
+        let result = load_config_str(toml);
+        assert!(
+            matches!(result, Err(ConfigError::Validation(ref msg)) if msg.contains("not yet implemented")),
+            "expected 'not yet implemented' error for per-pri, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_signing_global_sg_mode_accepted() {
+        let toml = r#"
+[signing]
+enabled = true
+key_path = "/etc/ssl/sign.key"
+signature_group = "global"
+"#;
+        let result = load_config_str(toml);
+        assert!(result.is_ok(), "global SG mode should be accepted: {result:?}");
     }
 
     // -- env var integration in config loading --------------------------------

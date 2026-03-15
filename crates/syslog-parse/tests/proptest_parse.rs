@@ -50,10 +50,37 @@ fn arb_sd_name_char() -> impl Strategy<Value = u8> {
     })
 }
 
-/// Generate a valid SD-ID string (1-32 SD-NAME chars).
+/// Generate a valid SD-ID string: either a registered ID (no `@`) or
+/// a valid enterprise ID (`name@PEN` with digits-only PEN).
 fn arb_sd_id() -> impl Strategy<Value = String> {
-    proptest::collection::vec(arb_sd_name_char(), 1..=32)
-        .prop_map(|bytes| String::from_utf8(bytes).unwrap_or_default())
+    // SD-NAME chars excluding '@' to avoid invalid enterprise IDs
+    let sd_name_no_at = (33u8..=126)
+        .prop_filter("SD-NAME excludes = ] \" SP @", |b| {
+            *b != b'=' && *b != b']' && *b != b'"' && *b != b' ' && *b != b'@'
+        });
+
+    // Registered: 1-32 chars, no '@'
+    let registered = proptest::collection::vec(sd_name_no_at, 1..=32)
+        .prop_map(|bytes| bytes.iter().map(|&b| b as char).collect::<String>());
+
+    // Enterprise: name@PEN where PEN is digits-only
+    let enterprise = (
+        proptest::collection::vec(
+            (33u8..=126).prop_filter("SD-NAME excludes = ] \" SP @", |b| {
+                *b != b'=' && *b != b']' && *b != b'"' && *b != b' ' && *b != b'@'
+            }),
+            1..=15,
+        ),
+        proptest::collection::vec(b'0'..=b'9', 1..=10),
+    )
+        .prop_map(|(name_bytes, pen_bytes)| {
+            let name: String = name_bytes.iter().map(|&b| b as char).collect();
+            let pen: String = pen_bytes.iter().map(|&b| b as char).collect();
+            format!("{name}@{pen}")
+        })
+        .prop_filter("enterprise SD-ID must be ≤32 chars", |s| s.len() <= 32);
+
+    prop_oneof![registered, enterprise].boxed()
 }
 
 /// Generate a valid PARAM-NAME (1-32 SD-NAME chars).

@@ -19,6 +19,9 @@ pub enum InvalidSdId {
     /// The SD-ID contains an invalid character.
     #[error("SD-ID contains invalid character: {0:?}")]
     InvalidChar(char),
+    /// Enterprise SD-ID has invalid format (must be `name@PEN` with digits-only PEN).
+    #[error("enterprise SD-ID must be name@PEN where PEN is digits-only: {0:?}")]
+    InvalidEnterprisePen(String),
 }
 
 /// An SD-ID identifying a structured data element.
@@ -64,7 +67,14 @@ impl SdId {
     /// Returns `InvalidSdId` if the string violates RFC 5424 §6.3.2 constraints.
     pub fn new(s: &str) -> Result<Self, InvalidSdId> {
         validate_sd_id(s)?;
-        if s.contains('@') {
+        if let Some(at_pos) = s.find('@') {
+            // RFC 5424 §6.3.2: enterprise SD-ID = name "@" PEN
+            // name must be non-empty, PEN must be non-empty digits per RFC 5612
+            let name_part = s.get(..at_pos).unwrap_or("");
+            let pen_part = s.get(at_pos + 1..).unwrap_or("");
+            if name_part.is_empty() || pen_part.is_empty() || !pen_part.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(InvalidSdId::InvalidEnterprisePen(s.to_owned()));
+            }
             Ok(Self::Enterprise(CompactString::new(s)))
         } else {
             Ok(Self::Registered(CompactString::new(s)))
@@ -133,6 +143,23 @@ mod tests {
         assert!(SdId::new("has=equals").is_err());
         assert!(SdId::new("has]bracket").is_err());
         assert!(SdId::new("has\"quote").is_err());
+    }
+
+    #[test]
+    fn enterprise_non_digit_pen_rejected() {
+        // RFC 5424 §6.3.2 + RFC 5612: PEN must be digits-only
+        assert!(SdId::new("test@abc").is_err());
+        assert!(SdId::new("test@12a").is_err());
+    }
+
+    #[test]
+    fn enterprise_empty_pen_rejected() {
+        assert!(SdId::new("test@").is_err());
+    }
+
+    #[test]
+    fn enterprise_empty_name_rejected() {
+        assert!(SdId::new("@12345").is_err());
     }
 
     #[test]

@@ -193,14 +193,31 @@ pub(crate) async fn shutdown_signal(shutdown: &tokio::sync::watch::Receiver<bool
     }
 }
 
+/// Maximum UDP syslog payload: 65535 − 8 byte UDP header = 65527.
+///
+/// RFC 5426 §3.2 MUST NOT: "a syslog sender MUST NOT send a UDP datagram
+/// with a SYSLOG-MSG longer than 65535-8 octets."
+const MAX_UDP_PAYLOAD: usize = 65527;
+
 /// Send a syslog message over UDP.
 ///
 /// RFC 5426 §3.1: A syslog sender sends each message in a single UDP datagram.
+///
+/// # Errors
+/// Returns [`TransportError::FrameTooLarge`] if the message exceeds
+/// the RFC 5426 §3.2 maximum of 65527 bytes.
 pub async fn send_udp(
     socket: &UdpSocket,
     target: SocketAddr,
     message: &[u8],
 ) -> Result<(), crate::error::TransportError> {
+    // RFC 5426 §3.2 MUST NOT: message must fit in a single UDP datagram
+    if message.len() > MAX_UDP_PAYLOAD {
+        return Err(crate::error::TransportError::FrameTooLarge {
+            size: message.len(),
+            max: MAX_UDP_PAYLOAD,
+        });
+    }
     socket.send_to(message, target).await?;
     Ok(())
 }
@@ -309,5 +326,41 @@ mod tests {
 
         let _ = shutdown_tx.send(true);
         let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn send_udp_oversized_rejected() {
+        // RFC 5426 §3.2: MUST NOT send > 65527 bytes
+        let socket = match UdpSocket::bind("127.0.0.1:0").await {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let target: SocketAddr = match "127.0.0.1:9999".parse() {
+            Ok(a) => a,
+            Err(_) => return,
+        };
+        let oversized = vec![0u8; MAX_UDP_PAYLOAD + 1];
+        let result = send_udp(&socket, target, &oversized).await;
+        assert!(result.is_err(), "messages > 65527 bytes must be rejected");
+    }
+
+    #[tokio::test]
+    async fn send_udp_max_size_accepted() {
+        // Exactly 65527 bytes should be accepted (may fail at OS level, but not our check)
+        let socket = match UdpSocket::bind("127.0.0.1:0").await {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let target: SocketAddr = match "127.0.0.1:9999".parse() {
+            Ok(a) => a,
+            Err(_) => return,
+        };
+        let max_msg = vec![0u8; MAX_UDP_PAYLOAD];
+        let result = send_udp(&socket, target, &max_msg).await;
+        // Should not be a FrameTooLarge error (may be an IO error from OS)
+        assert!(
+            !matches!(result, Err(crate::error::TransportError::FrameTooLarge { .. })),
+            "exactly 65527 bytes should pass size validation"
+        );
     }
 }

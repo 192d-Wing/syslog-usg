@@ -1,6 +1,6 @@
 # RFC Compliance Matrix
 
-**Last updated:** 2026-03-14
+**Last updated:** 2026-03-15
 
 This document tracks which RFCs syslog-usg implements, the level of compliance, and where the implementation lives.
 
@@ -25,6 +25,7 @@ This document tracks which RFCs syslog-usg implements, the level of compliance, 
 | §6.2.7 | MSGID ≤32 printable US-ASCII | MUST | Length and character validation in types |
 | §6.3 | STRUCTURED-DATA format | MUST | Full SD-ELEMENT/SD-PARAM parsing and serialization |
 | §6.3.2 | SD-ID prohibits '=', SP, ']', '"' | MUST | Validated in parser and constructor |
+| §6.3.2 | Enterprise SD-ID `name@PEN` with digits-only PEN | MUST | Validated in `SdId::new()` constructor |
 | §6.3.3 | SD-PARAM value escaping ('"', '\\', ']') | MUST | Escape/unescape in parser and serializer |
 | §6.4 | MSG encoding UTF-8 or other with BOM | MAY | UTF-8 assumed; BOM detection supported |
 
@@ -60,6 +61,7 @@ Best-effort heuristic parser with fallback for legacy BSD syslog messages. Not a
 | Section | Requirement | Level | Implementation |
 |---------|-------------|-------|----------------|
 | §3.1 | One message per UDP datagram | MUST | `UdpListener` reads one datagram at a time |
+| §3.2 | Sender MUST NOT exceed 65527-byte UDP payload | MUST | `send_udp()` validates `message.len() <= 65527` before sending |
 | §3.6 | Handle message bursts | SHOULD | Bounded channel with `try_send()` drop on overflow; configurable `SO_RCVBUF` |
 
 ### RFC 6587 — Transmission of Syslog Messages over TCP
