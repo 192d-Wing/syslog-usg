@@ -661,8 +661,12 @@ fn build_outputs(config: &ServerConfig) -> Vec<NetworkOutput> {
                 info!(
                     name = %output_cfg.name,
                     addr = %addr,
-                    cert = %tls_cfg.cert_path,
                     "TLS output configured"
+                );
+                debug!(
+                    name = %output_cfg.name,
+                    cert = %tls_cfg.cert_path,
+                    "TLS output certificate path"
                 );
                 outputs.push(output);
             }
