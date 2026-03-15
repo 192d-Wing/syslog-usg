@@ -386,6 +386,8 @@ fn start_listeners(
                         }
                     };
 
+                    check_key_file_permissions(&tls_cfg.key_path);
+
                     let transport_tls = syslog_transport::tls::TlsConfig {
                         cert_path: tls_cfg.cert_path.clone(),
                         key_path: tls_cfg.key_path.clone(),
@@ -536,6 +538,7 @@ fn build_signing_stage(config: &ServerConfig) -> Option<syslog_relay::SigningSta
     }
 
     // Load PKCS#8 DER-encoded private key
+    check_key_file_permissions(&signing_cfg.key_path);
     let key_bytes = match std::fs::read(&signing_cfg.key_path) {
         Ok(b) => b,
         Err(e) => {
@@ -672,6 +675,38 @@ fn build_verification_stage(config: &ServerConfig) -> Option<syslog_relay::Verif
 /// Returns `None` if the variable is not set or empty.
 fn gethostname() -> Option<String> {
     std::env::var("HOSTNAME").ok().filter(|s| !s.is_empty())
+}
+
+/// Check that a private key file is not group/world readable.
+///
+/// On Unix, warns if the file mode allows group or other read access.
+/// On non-Unix platforms this is a no-op.
+fn check_key_file_permissions(path: &str) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        match std::fs::metadata(path) {
+            Ok(meta) => {
+                let mode = meta.permissions().mode();
+                // Check if group (0o040) or other (0o004) read bits are set
+                if mode & 0o044 != 0 {
+                    warn!(
+                        path = %path,
+                        mode = format!("{mode:04o}"),
+                        "private key file is readable by group/other — \
+                         recommend chmod 0600 for production use"
+                    );
+                }
+            }
+            Err(e) => {
+                debug!(path = %path, "could not check key file permissions: {e}");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
 }
 
 /// Build network outputs from configuration.
