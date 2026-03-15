@@ -15,7 +15,16 @@ use crate::types::HashAlgorithm;
 #[must_use]
 pub fn hash_message(algorithm: HashAlgorithm, data: &[u8]) -> Vec<u8> {
     let algo = match algorithm {
-        HashAlgorithm::Sha1 => &digest::SHA1_FOR_LEGACY_USE_ONLY,
+        HashAlgorithm::Sha1 => {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static SHA1_WARNED: AtomicBool = AtomicBool::new(false);
+            if !SHA1_WARNED.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    "SHA-1 hash algorithm is deprecated — use SHA-256 for new deployments"
+                );
+            }
+            &digest::SHA1_FOR_LEGACY_USE_ONLY
+        }
         HashAlgorithm::Sha256 => &digest::SHA256,
     };
     digest::digest(algo, data).as_ref().to_vec()
