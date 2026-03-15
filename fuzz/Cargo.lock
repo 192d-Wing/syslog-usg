@@ -55,6 +55,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
 name = "bitflags"
 version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -628,6 +634,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "syslog-sign"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "bytes",
+ "compact_str",
+ "ring",
+ "rustls",
+ "smallvec",
+ "subtle",
+ "syslog-parse",
+ "syslog-proto",
+ "thiserror",
+ "tracing",
+ "webpki-roots",
+ "zeroize",
+]
+
+[[package]]
 name = "syslog-transport"
 version = "0.1.0"
 dependencies = [
@@ -650,11 +675,15 @@ name = "syslog-usg-fuzz"
 version = "0.0.0"
 dependencies = [
  "arbitrary",
+ "base64",
  "bytes",
+ "compact_str",
  "libfuzzer-sys",
+ "smallvec",
  "syslog-config",
  "syslog-parse",
  "syslog-proto",
+ "syslog-sign",
  "syslog-transport",
  "tokio-util",
 ]
@@ -875,6 +904,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9517f9239f02c069db75e65f174b3da828fe5f5b945c4dd26bd25d89c03ebcf5"
 dependencies = [
  "wit-bindgen",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22cfaf3c063993ff62e73cb4311efde4db1efb31ab78a3e5c457939ad5cc0bed"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]

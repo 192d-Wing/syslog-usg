@@ -11,6 +11,9 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 bytes = "1"
+base64 = "0.22"
+compact_str = { version = "0.9", features = ["serde"] }
+smallvec = { version = "1", features = ["serde"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 
 [dependencies.syslog-proto]
@@ -24,6 +27,9 @@ path = "../crates/syslog-transport"
 
 [dependencies.syslog-config]
 path = "../crates/syslog-config"
+
+[dependencies.syslog-sign]
+path = "../crates/syslog-sign"
 
 [workspace]
 members = ["."]
@@ -82,6 +88,34 @@ bench = false
 [[bin]]
 name = "fuzz_roundtrip"
 path = "fuzz_targets/fuzz_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_cert_reassembly"
+path = "fuzz_targets/fuzz_cert_reassembly.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_signature_block"
+path = "fuzz_targets/fuzz_signature_block.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_replay_detector"
+path = "fuzz_targets/fuzz_replay_detector.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_pem_loader"
+path = "fuzz_targets/fuzz_pem_loader.rs"
 test = false
 doc = false
 bench = false
