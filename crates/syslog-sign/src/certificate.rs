@@ -14,6 +14,14 @@ use crate::types::{SignatureGroup, Ver};
 /// Sized to keep certificate block messages under 2048 octets.
 const DEFAULT_FRAGMENT_SIZE: usize = 512;
 
+/// Maximum certificate payload size (1 MiB).
+/// Prevents attacker-controlled TPBL from causing OOM.
+const MAX_CERT_PAYLOAD: u64 = 1_048_576;
+
+/// Maximum number of certificate fragments to reassemble.
+/// Prevents CPU/memory exhaustion from millions of tiny fragments.
+const MAX_CERT_FRAGMENTS: usize = 2048;
+
 /// Fragment a certificate payload into multiple certificate blocks.
 ///
 /// Each block is signed with the provided key. The `signing_data_fn`
@@ -92,11 +100,26 @@ pub fn reassemble_certificate(blocks: &[CertificateBlock]) -> Result<Vec<u8>, Si
         return Err(SignError::CertificateBlock("no certificate blocks".into()));
     }
 
+    // Limit fragment count to prevent CPU exhaustion
+    if blocks.len() > MAX_CERT_FRAGMENTS {
+        return Err(SignError::CertificateBlock(format!(
+            "too many certificate fragments: {} (max {MAX_CERT_FRAGMENTS})",
+            blocks.len()
+        )));
+    }
+
     // All blocks should have the same TPBL
     let tpbl = blocks
         .first()
         .ok_or_else(|| SignError::CertificateBlock("empty blocks list".into()))?
         .tpbl;
+
+    // Validate TPBL before allocating to prevent OOM from attacker-controlled values
+    if tpbl > MAX_CERT_PAYLOAD {
+        return Err(SignError::CertificateBlock(format!(
+            "TPBL {tpbl} exceeds maximum certificate payload size ({MAX_CERT_PAYLOAD})"
+        )));
+    }
 
     for block in blocks {
         if block.tpbl != tpbl {
@@ -248,5 +271,47 @@ mod tests {
 
         let result = reassemble_certificate(&[b1, b2_gap]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn reassemble_rejects_excessive_tpbl() {
+        let block = CertificateBlock {
+            ver: test_ver(),
+            rsid: 0,
+            sg: SignatureGroup::Global,
+            spri: 0,
+            tpbl: MAX_CERT_PAYLOAD + 1,
+            index: 1,
+            flen: 10,
+            fragment: vec![0; 10],
+            signature: vec![],
+        };
+        let result = reassemble_certificate(&[block]);
+        assert!(result.is_err());
+        if let Err(SignError::CertificateBlock(msg)) = &result {
+            assert!(msg.contains("exceeds maximum"), "unexpected error: {msg}");
+        }
+    }
+
+    #[test]
+    fn reassemble_rejects_too_many_fragments() {
+        let blocks: Vec<CertificateBlock> = (0..MAX_CERT_FRAGMENTS + 1)
+            .map(|i| CertificateBlock {
+                ver: test_ver(),
+                rsid: 0,
+                sg: SignatureGroup::Global,
+                spri: 0,
+                tpbl: 100,
+                index: (i as u64) + 1,
+                flen: 1,
+                fragment: vec![0],
+                signature: vec![],
+            })
+            .collect();
+        let result = reassemble_certificate(&blocks);
+        assert!(result.is_err());
+        if let Err(SignError::CertificateBlock(msg)) = &result {
+            assert!(msg.contains("too many"), "unexpected error: {msg}");
+        }
     }
 }
