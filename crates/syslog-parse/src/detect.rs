@@ -6,6 +6,12 @@
 use crate::error::ParseError;
 use syslog_proto::SyslogMessage;
 
+/// Maximum message size accepted by the auto-detect parser (2 MiB).
+///
+/// Messages exceeding this limit are rejected before parsing to prevent
+/// unbounded memory allocation from oversized input.
+const MAX_MESSAGE_SIZE: usize = 2 * 1024 * 1024;
+
 /// Auto-detect the syslog format and parse accordingly.
 ///
 /// After parsing the PRI (`<NNN>`), checks whether the next character is a
@@ -14,6 +20,13 @@ use syslog_proto::SyslogMessage;
 pub fn parse_auto(input: &[u8]) -> Result<SyslogMessage, ParseError> {
     if input.is_empty() {
         return Err(ParseError::EmptyInput);
+    }
+
+    if input.len() > MAX_MESSAGE_SIZE {
+        return Err(ParseError::MessageTooLarge {
+            max: MAX_MESSAGE_SIZE,
+            actual: input.len(),
+        });
     }
 
     // RFC 5424 §6.1 MUST: PRI starts with '<'
