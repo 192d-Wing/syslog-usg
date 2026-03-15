@@ -54,7 +54,7 @@ A production-grade, RFC-compliant Syslog server and relay written in Rust.
 ## Install
 
 # From binary release (Linux x86_64):
-curl -LO https://github.com/<org>/syslog-usg/releases/latest/download/syslog-usg-linux-amd64.tar.gz
+curl -LO https://github.com/192d-Wing/syslog-usg/releases/latest/download/syslog-usg-linux-amd64.tar.gz
 tar xzf syslog-usg-linux-amd64.tar.gz
 sudo mv syslog-usg /usr/local/bin/
 
@@ -344,26 +344,31 @@ State the project license. Recommended: MIT OR Apache-2.0 (dual-license), consis
 Compliance is verified through multiple test layers:
 
 **RFC Conformance Test Suite** (`tests/conformance/`):
+
 - `rfc5424_valid.rs` -- Corpus of valid RFC 5424 messages derived from the ABNF grammar and RFC examples. Every MUST requirement has at least one positive test.
 - `rfc5424_invalid.rs` -- Corpus of invalid messages that MUST be rejected in strict mode. Covers all parse error variants.
 - `rfc3164_compat.rs` -- Best-effort parsing of common legacy formats from real-world vendors.
 
 **Fuzz Testing** (`fuzz/`):
+
 - `fuzz_parse_5424.rs` -- Continuous fuzzing of the RFC 5424 parser using `cargo-fuzz` / `libfuzzer`.
 - `fuzz_parse_3164.rs` -- Continuous fuzzing of the legacy parser.
 - Fuzz targets are run on schedule in CI and on-demand by developers.
 
 **Integration Tests** (`tests/integration/`):
+
 - `udp_ingest.rs` -- UDP send, parse verification, output verification.
 - `tls_ingest.rs` -- TLS connection, mutual auth, send, parse, verify.
 - `relay_pipeline.rs` -- Full pipeline: ingest, filter, route, output.
 
 **Interoperability Testing**:
+
 - Tested against rsyslog and syslog-ng as both sender and receiver.
 - Tested with real-world structured data from Cisco, Palo Alto, Fortinet, and Linux auditd.
 - Vendor-specific message corpus maintained in the test suite.
 
 **Benchmarks** (`benches/syslog-bench/`):
+
 - `parse_5424.rs` -- Criterion benchmarks for RFC 5424 parsing throughput.
 - `parse_3164.rs` -- Criterion benchmarks for legacy parsing.
 - `pipeline.rs` -- End-to-end pipeline latency and throughput.
@@ -381,13 +386,13 @@ Download the pre-built static binary for your platform from the GitHub releases 
 
 ```bash
 # Linux x86_64
-curl -LO https://github.com/<org>/syslog-usg/releases/latest/download/syslog-usg-linux-amd64.tar.gz
+curl -LO https://github.com/192d-Wing/syslog-usg/releases/latest/download/syslog-usg-linux-amd64.tar.gz
 tar xzf syslog-usg-linux-amd64.tar.gz
 sudo mv syslog-usg /usr/local/bin/
 sudo chmod +x /usr/local/bin/syslog-usg
 
 # Linux aarch64
-curl -LO https://github.com/<org>/syslog-usg/releases/latest/download/syslog-usg-linux-arm64.tar.gz
+curl -LO https://github.com/192d-Wing/syslog-usg/releases/latest/download/syslog-usg-linux-arm64.tar.gz
 tar xzf syslog-usg-linux-arm64.tar.gz
 sudo mv syslog-usg /usr/local/bin/
 
@@ -398,20 +403,20 @@ syslog-usg --version
 #### Container Image
 
 ```bash
-docker pull ghcr.io/<org>/syslog-usg:latest
+docker pull ghcr.io/192d-Wing/syslog-usg:latest
 docker run -d \
   --name syslog-usg \
   -p 514:514/udp \
   -p 6514:6514/tcp \
   -p 9090:9090/tcp \
   -v /etc/syslog-usg:/etc/syslog-usg:ro \
-  ghcr.io/<org>/syslog-usg:latest
+  ghcr.io/192d-Wing/syslog-usg:latest
 ```
 
 #### Build from Source
 
 ```bash
-git clone https://github.com/<org>/syslog-usg.git
+git clone https://github.com/192d-Wing/syslog-usg.git
 cd syslog-usg
 cargo build --release
 sudo cp target/release/syslog-usg /usr/local/bin/
@@ -446,6 +451,7 @@ syslog-usg --config /path/to/config.toml
 ```
 
 Environment variable substitution is supported in all string values:
+
 - `${VAR}` -- substitute the value of environment variable `VAR` (error if unset)
 - `${VAR:-default}` -- substitute the value of `VAR`, or `default` if unset
 
@@ -561,6 +567,7 @@ Each output has an associated bounded queue.
 | `overflow_policy` | String | `"drop_newest"` | Backpressure policy: `"drop_newest"`, `"drop_oldest"`, or `"block"`. |
 
 Overflow policies:
+
 - `drop_newest` -- Discard incoming messages when the queue is full. Counted in `syslog_messages_dropped_total{reason="queue_full"}`.
 - `drop_oldest` -- Discard the oldest message in the queue to make room. Counted in the same metric.
 - `block` -- Apply backpressure to the input stage. Use with caution: this can cause upstream listeners to stall.
@@ -1173,7 +1180,7 @@ LimitNOFILE=65536
 # /etc/systemd/system/syslog-usg.service
 [Unit]
 Description=syslog-usg - Production Syslog Server/Relay
-Documentation=https://github.com/<org>/syslog-usg
+Documentation=https://github.com/192d-Wing/syslog-usg
 After=network-online.target
 Wants=network-online.target
 
@@ -1271,7 +1278,7 @@ CMD ["--config", "/etc/syslog-usg/syslog-usg.toml"]
 version: '3.8'
 services:
   syslog-usg:
-    image: ghcr.io/<org>/syslog-usg:latest
+    image: ghcr.io/192d-Wing/syslog-usg:latest
     ports:
       - "514:514/udp"
       - "6514:6514/tcp"
@@ -1384,7 +1391,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: syslog-usg
-          image: ghcr.io/<org>/syslog-usg:latest
+          image: ghcr.io/192d-Wing/syslog-usg:latest
           args: ["--config", "/etc/syslog-usg/syslog-usg.toml"]
           ports:
             - name: syslog-udp
@@ -1773,6 +1780,7 @@ syslog-usg/                    Workspace root
 ```
 
 Key design rules:
+
 - `syslog-config` has no protocol dependency (plain data structs + serde).
 - `syslog-observe` has no protocol dependency (metrics facade + HTTP server).
 - `syslog-relay` depends only on `syslog-proto` (operates on parsed messages, not bytes).
@@ -1910,9 +1918,9 @@ fn rfc5424_s6_1_pri_range_0_to_191() {
 }
 ```
 
-5. **Fuzz for edge cases**: Fuzz testing catches requirements violations that manual test cases miss. Run `cargo-fuzz` targets regularly.
+1. **Fuzz for edge cases**: Fuzz testing catches requirements violations that manual test cases miss. Run `cargo-fuzz` targets regularly.
 
-6. **Interop testing**: Test against real syslog implementations to verify practical compatibility beyond RFC letter compliance.
+2. **Interop testing**: Test against real syslog implementations to verify practical compatibility beyond RFC letter compliance.
 
 ---
 
@@ -1932,9 +1940,11 @@ fn rfc5424_s6_1_pri_range_0_to_191() {
 - Mark functions with `#[must_use]` when returning important values.
 - All bounded queues and channels -- no unbounded buffers anywhere.
 - RFC compliance comments on protocol-relevant code:
+
   ```rust
   // RFC 5424 S6.1 MUST: PRI value MUST be 1-3 digits in range 0-191
   ```
+
 - Feature flags only for compile-time complexity reduction, not runtime branching.
 
 ---
