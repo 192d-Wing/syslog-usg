@@ -1621,6 +1621,7 @@ dependencies = [
  "syslog-parse",
  "syslog-proto",
  "syslog-relay",
+ "syslog-sign",
  "tokio",
 ]
 
@@ -1739,6 +1740,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64",
  "bytes",
  "clap",
  "compact_str",

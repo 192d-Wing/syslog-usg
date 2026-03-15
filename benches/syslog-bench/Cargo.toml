@@ -24,10 +24,15 @@ harness = false
 name = "pipeline"
 harness = false
 
+[[bench]]
+name = "outputs"
+harness = false
+
 [dependencies]
 syslog-proto = { workspace = true }
 syslog-parse = { workspace = true }
 syslog-relay = { workspace = true }
+syslog-sign = { workspace = true }
 bytes = { workspace = true }
 compact_str = { workspace = true }
 criterion = { workspace = true }

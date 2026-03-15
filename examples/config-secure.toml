@@ -2,11 +2,15 @@
 #
 # This configuration demonstrates a hardened deployment with:
 # - TLS listener with mutual authentication (mTLS)
+# - Per-source-IP connection limits
 # - UDP listener on localhost only (for local apps)
-# - RFC 5848 message signing
-# - RFC 5848 signature verification
+# - RFC 5848 message signing with RSID persistence
+# - RFC 5848 signature verification with replay detection persistence
 # - Authenticated management endpoints
 # - Alarm filtering (RFC 5674)
+# - File, buffer, and console management actions
+#
+# Key files accept both PEM and DER format (auto-detected).
 #
 # Environment variables:
 #   SYSLOG_METRICS_TOKEN — bearer token for /metrics and /management/*
@@ -28,6 +32,7 @@ drain_timeout_seconds = 10
 protocol = "tls"
 bind_address = "0.0.0.0:6514"
 max_connections = 1000
+max_connections_per_ip = 50
 read_timeout_secs = 30
 
 [listeners.tls]
@@ -78,12 +83,13 @@ max_active_alarms = 10000
 # ---------------------------------------------------------------------------
 [signing]
 enabled = true
-key_path = "/etc/syslog-usg/sign/signing.key"
-cert_path = "/etc/syslog-usg/sign/signing.crt"
+key_path = "/etc/syslog-usg/sign/signing.key"        # PEM or DER
+cert_path = "/etc/syslog-usg/sign/signing.crt"        # PEM or DER
 hash_algorithm = "sha256"
 signature_group = "global"
 max_hashes_per_block = 25
 cert_emit_interval_secs = 3600
+state_dir = "/var/lib/syslog-usg/signing"              # RSID persistence
 
 # ---------------------------------------------------------------------------
 # Verification (RFC 5848)
@@ -91,10 +97,11 @@ cert_emit_interval_secs = 3600
 [verification]
 enabled = true
 trusted_key_paths = [
-    "/etc/syslog-usg/sign/trusted-upstream-1.pub",
+    "/etc/syslog-usg/sign/trusted-upstream-1.pub",    # PEM or DER
     "/etc/syslog-usg/sign/trusted-upstream-2.pub",
 ]
 reject_unverified = false  # Accept unsigned messages (set true for strict mode)
+state_path = "/var/lib/syslog-usg/replay-state.txt"   # Replay detector persistence
 
 # ---------------------------------------------------------------------------
 # Management Actions (RFC 9742)
@@ -111,6 +118,33 @@ type = "remote"
 host = "soc-collector.internal"
 port = 6514
 protocol = "tls"
+
+# Write all messages to a local audit log file
+[[actions]]
+description = "Local audit log"
+[actions.selector]
+facilities = ["auth", "authpriv"]
+[actions.action]
+type = "file"
+path = "/var/log/syslog-usg/audit.log"
+
+# Keep last 1000 error messages in memory for debugging
+[[actions]]
+description = "Recent errors buffer"
+[actions.selector]
+min_severity = "error"
+[actions.action]
+type = "buffer"
+name = "recent-errors"
+size = 1000
+
+# Print kern messages to console (stdout) for debugging
+[[actions]]
+description = "Kernel messages to console"
+[actions.selector]
+facilities = ["kern"]
+[actions.action]
+type = "console"
 
 # Discard debug-level messages from noisy applications
 [[actions]]
