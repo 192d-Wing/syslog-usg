@@ -98,24 +98,24 @@ impl AtomicMessageCounters {
         }
     }
 
-    /// Increment the received counter by one.
+    /// Increment the received counter by one (saturating at `u64::MAX`).
     pub fn increment_received(&self) {
-        self.received.fetch_add(1, Ordering::Relaxed);
+        saturating_fetch_add(&self.received);
     }
 
-    /// Increment the forwarded counter by one.
+    /// Increment the forwarded counter by one (saturating at `u64::MAX`).
     pub fn increment_forwarded(&self) {
-        self.forwarded.fetch_add(1, Ordering::Relaxed);
+        saturating_fetch_add(&self.forwarded);
     }
 
-    /// Increment the dropped counter by one.
+    /// Increment the dropped counter by one (saturating at `u64::MAX`).
     pub fn increment_dropped(&self) {
-        self.dropped.fetch_add(1, Ordering::Relaxed);
+        saturating_fetch_add(&self.dropped);
     }
 
-    /// Increment the malformed counter by one.
+    /// Increment the malformed counter by one (saturating at `u64::MAX`).
     pub fn increment_malformed(&self) {
-        self.malformed.fetch_add(1, Ordering::Relaxed);
+        saturating_fetch_add(&self.malformed);
     }
 
     /// Take a consistent snapshot of the current counter values.
@@ -134,6 +134,15 @@ impl Default for AtomicMessageCounters {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Saturating atomic increment: increments an `AtomicU64` by 1, capping at
+/// `u64::MAX` rather than wrapping. Uses `fetch_update` with `Relaxed`
+/// ordering for consistency with the non-atomic `MessageCounters`.
+fn saturating_fetch_add(counter: &AtomicU64) {
+    let _result = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+        if v == u64::MAX { None } else { Some(v + 1) }
+    });
 }
 
 /// Inner state shared behind an `Arc`.
