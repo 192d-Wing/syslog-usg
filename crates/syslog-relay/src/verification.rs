@@ -151,6 +151,12 @@ impl VerificationStage {
         self.reject_unverified
     }
 
+    /// Returns the number of configured verifiers (trusted keys).
+    #[must_use]
+    pub fn verifier_count(&self) -> usize {
+        self.verifiers.len()
+    }
+
     /// Determine if a message should be forwarded based on the verification result.
     ///
     /// Returns `true` if the message should be passed through.

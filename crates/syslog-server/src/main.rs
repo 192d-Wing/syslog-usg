@@ -519,46 +519,159 @@ fn build_filters(config: &ServerConfig) -> Vec<Box<dyn MessageFilter>> {
 
 /// Build the optional RFC 5848 signing stage from configuration.
 ///
-/// Key loading from files is not yet implemented — returns `None` when
-/// signing is not enabled, and logs an error when enabled.
+/// Loads the PKCS#8 signing key and optional X.509 certificate from disk,
+/// then constructs a [`SigningStage`] for the relay pipeline.
 fn build_signing_stage(config: &ServerConfig) -> Option<syslog_relay::SigningStage> {
-    if let Some(ref signing_cfg) = config.signing {
-        if signing_cfg.enabled {
-            error!(
-                "signing enabled in config but key loading is not yet implemented — \
-                 signing will not be active"
-            );
-            debug!(
-                key_path = %signing_cfg.key_path,
-                cert_path = ?signing_cfg.cert_path,
-                hash_algorithm = ?signing_cfg.hash_algorithm,
-                signature_group = ?signing_cfg.signature_group,
-                "signing configuration details"
-            );
-        }
+    use bytes::Bytes;
+    use compact_str::CompactString;
+    use syslog_proto::{Facility, Severity, StructuredData, SyslogMessage, SyslogTimestamp};
+    use syslog_sign::counter::RebootSessionId;
+    use syslog_sign::signer::{Signer, SignerConfig};
+    use syslog_sign::types::{HashAlgorithm, SignatureGroup};
+    use syslog_sign::SigningKey;
+
+    let signing_cfg = config.signing.as_ref()?;
+    if !signing_cfg.enabled {
+        return None;
     }
-    None
+
+    // Load PKCS#8 DER-encoded private key
+    let key_bytes = match std::fs::read(&signing_cfg.key_path) {
+        Ok(b) => b,
+        Err(e) => {
+            error!(path = %signing_cfg.key_path, "failed to read signing key: {e}");
+            return None;
+        }
+    };
+
+    let signing_key = match SigningKey::from_pkcs8(&key_bytes) {
+        Ok(k) => k,
+        Err(e) => {
+            error!("failed to parse signing key: {e}");
+            return None;
+        }
+    };
+
+    // Load optional DER-encoded X.509 certificate
+    let cert_der = signing_cfg.cert_path.as_ref().and_then(|cert_path| {
+        match std::fs::read(cert_path) {
+            Ok(b) => {
+                info!(path = %cert_path, "loaded signing certificate");
+                Some(b)
+            }
+            Err(e) => {
+                warn!(path = %cert_path, "failed to read signing certificate: {e}");
+                None
+            }
+        }
+    });
+
+    // Parse config options
+    let hash_algorithm = match signing_cfg.hash_algorithm.as_deref() {
+        Some("sha1") => HashAlgorithm::Sha1,
+        _ => HashAlgorithm::Sha256,
+    };
+
+    let signature_group = match signing_cfg.signature_group.as_deref() {
+        Some("per-pri") => SignatureGroup::PerPri,
+        Some("pri-ranges") => SignatureGroup::PriRanges,
+        Some("custom") => SignatureGroup::Custom,
+        _ => SignatureGroup::Global,
+    };
+
+    let signer_config = SignerConfig {
+        hash_algorithm,
+        signature_group,
+        max_hashes_per_block: signing_cfg.max_hashes_per_block.unwrap_or(25),
+        ..Default::default()
+    };
+
+    let rsid = RebootSessionId::unpersisted();
+    let signer = Signer::new(signing_key, rsid, signer_config);
+
+    let cert_interval = std::time::Duration::from_secs(
+        signing_cfg.cert_emit_interval_secs.unwrap_or(3600),
+    );
+
+    // Build a template message for signature/certificate block messages
+    let hostname = gethostname().unwrap_or_else(|| "syslog-usg".to_owned());
+    let template = SyslogMessage {
+        facility: Facility::Syslog,
+        severity: Severity::Informational,
+        version: 1,
+        timestamp: SyslogTimestamp::Nil,
+        hostname: Some(CompactString::new(&hostname)),
+        app_name: Some(CompactString::new("syslog-sign")),
+        proc_id: None,
+        msg_id: None,
+        structured_data: StructuredData::nil(),
+        msg: Some(Bytes::from_static(b"")),
+        raw: None,
+    };
+
+    let stage = syslog_relay::SigningStage::new(signer, cert_der, cert_interval, template);
+
+    info!(
+        hash = ?hash_algorithm,
+        sg = ?signature_group,
+        "RFC 5848 signing stage enabled"
+    );
+
+    Some(stage)
 }
 
 /// Build the optional RFC 5848 verification stage from configuration.
 ///
-/// Key loading from files is not yet implemented — returns `None` when
-/// verification is not enabled, and logs an error when enabled.
+/// Loads trusted public key files from disk and constructs a
+/// [`VerificationStage`] for the relay pipeline.
 fn build_verification_stage(config: &ServerConfig) -> Option<syslog_relay::VerificationStage> {
-    if let Some(ref verif_cfg) = config.verification {
-        if verif_cfg.enabled {
-            error!(
-                "verification enabled in config but key loading is not yet implemented — \
-                 verification will not be active"
-            );
-            debug!(
-                trusted_keys = verif_cfg.trusted_key_paths.len(),
-                reject_unverified = verif_cfg.reject_unverified,
-                "verification configuration details"
-            );
-        }
+    use syslog_sign::signature::VerifyingKey;
+    use syslog_sign::verifier::Verifier;
+
+    let verif_cfg = config.verification.as_ref()?;
+    if !verif_cfg.enabled {
+        return None;
     }
-    None
+
+    let mut verifiers = Vec::new();
+
+    for key_path in &verif_cfg.trusted_key_paths {
+        let key_bytes = match std::fs::read(key_path) {
+            Ok(b) => b,
+            Err(e) => {
+                error!(path = %key_path, "failed to read trusted key: {e}");
+                continue;
+            }
+        };
+
+        let verifying_key = VerifyingKey::new(key_bytes);
+        verifiers.push(Verifier::new(verifying_key));
+        info!(path = %key_path, "loaded trusted verification key");
+    }
+
+    if verifiers.is_empty() {
+        error!(
+            "verification enabled but no trusted keys were loaded — \
+             all signed messages will fail verification"
+        );
+    }
+
+    let stage = syslog_relay::VerificationStage::new(verifiers, verif_cfg.reject_unverified);
+
+    info!(
+        keys = stage.verifier_count(),
+        reject_unverified = verif_cfg.reject_unverified,
+        "RFC 5848 verification stage enabled"
+    );
+
+    Some(stage)
+}
+
+/// Get the system hostname from the `HOSTNAME` environment variable.
+///
+/// Returns `None` if the variable is not set or empty.
+fn gethostname() -> Option<String> {
+    std::env::var("HOSTNAME").ok().filter(|s| !s.is_empty())
 }
 
 /// Build network outputs from configuration.
