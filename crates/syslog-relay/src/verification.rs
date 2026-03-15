@@ -5,6 +5,7 @@
 
 use syslog_proto::SyslogMessage;
 use syslog_sign::blocks::{SignatureBlock, find_ssign};
+use syslog_sign::types::SignatureScheme;
 use syslog_sign::verifier::Verifier;
 use tracing::{debug, warn};
 
@@ -84,6 +85,16 @@ impl VerificationStage {
                 return VerificationResult::Reject;
             }
         };
+
+        // RFC 5848 §4.2.2: warn if the incoming signature uses DSA (scheme=1),
+        // which this implementation does not support — we use ECDSA P-256 instead.
+        if sig_block.ver.signature_scheme == SignatureScheme::OpenPgpDsa {
+            warn!(
+                "RFC 5848 §4.2.2: incoming signature uses OpenPGP DSA (scheme=1), \
+                 which this implementation cannot verify — only ECDSA P-256 (scheme=2) \
+                 is supported (explicit deviation from RFC 5848)"
+            );
+        }
 
         // Try each verifier
         for verifier in &self.verifiers {
@@ -243,6 +254,70 @@ mod tests {
 
         let stage2 = VerificationStage::new(vec![], false);
         assert!(!stage2.reject_unverified());
+    }
+
+    #[test]
+    fn reject_dsa_scheme_signature() {
+        // RFC 5848 §4.2.2: DSA (scheme=1) signatures cannot be verified
+        // because this implementation only supports ECDSA P-256 (scheme=2).
+        let sd_element = syslog_proto::SdElement {
+            id: match syslog_proto::SdId::new("ssign") {
+                Ok(id) => id,
+                Err(_) => return,
+            },
+            params: SmallVec::from_vec(vec![
+                syslog_proto::SdParam {
+                    name: CompactString::new("VER"),
+                    value: CompactString::new("0111"), // SHA-1 + DSA
+                },
+                syslog_proto::SdParam {
+                    name: CompactString::new("RSID"),
+                    value: CompactString::new("0"),
+                },
+                syslog_proto::SdParam {
+                    name: CompactString::new("SG"),
+                    value: CompactString::new("0"),
+                },
+                syslog_proto::SdParam {
+                    name: CompactString::new("SPRI"),
+                    value: CompactString::new("0"),
+                },
+                syslog_proto::SdParam {
+                    name: CompactString::new("GBC"),
+                    value: CompactString::new("1"),
+                },
+                syslog_proto::SdParam {
+                    name: CompactString::new("FMN"),
+                    value: CompactString::new("1"),
+                },
+                syslog_proto::SdParam {
+                    name: CompactString::new("CNT"),
+                    value: CompactString::new("1"),
+                },
+                syslog_proto::SdParam {
+                    name: CompactString::new("HB"),
+                    value: CompactString::new("dGVzdA=="), // base64 "test"
+                },
+                syslog_proto::SdParam {
+                    name: CompactString::new("SIGN"),
+                    value: CompactString::new("dGVzdA=="),
+                },
+            ]),
+        };
+
+        let mut msg = make_message("test");
+        msg.structured_data = StructuredData(SmallVec::from_vec(vec![sd_element]));
+
+        // Create a verifier with a real key (it won't matter — DSA scheme can't verify)
+        let (key, _) = match SigningKey::generate() {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let verifier = Verifier::new(VerifyingKey::new(key.public_key_bytes().to_vec()));
+        let stage = VerificationStage::new(vec![verifier], false);
+        let result = stage.check_incoming(&msg);
+        // Should reject because DSA signatures can't be verified with ECDSA keys
+        assert_eq!(result, VerificationResult::Reject);
     }
 
     #[test]

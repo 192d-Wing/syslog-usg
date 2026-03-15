@@ -75,4 +75,11 @@ pub enum SignError {
     /// The key or certificate is invalid.
     #[error("invalid key material: {0}")]
     InvalidKey(String),
+
+    /// X.509 certificate path validation failed.
+    ///
+    /// RFC 5848 §4.2.6 requires PKIX certificate validation (RFC 5280)
+    /// before using a public key for signature verification.
+    #[error("certificate validation failed: {0}")]
+    CertificateValidation(String),
 }

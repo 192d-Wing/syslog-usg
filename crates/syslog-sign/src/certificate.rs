@@ -5,6 +5,9 @@
 //! length), INDEX (1-based byte offset), FLEN (fragment length), and FRAG
 //! (the fragment data).
 
+use rustls::RootCertStore;
+use rustls::pki_types::CertificateDer;
+
 use crate::blocks::CertificateBlock;
 use crate::error::SignError;
 use crate::signature::SigningKey;
@@ -158,6 +161,91 @@ pub fn reassemble_certificate(blocks: &[CertificateBlock]) -> Result<Vec<u8>, Si
     Ok(payload)
 }
 
+/// Build a [`RootCertStore`] from DER-encoded root certificate bytes.
+///
+/// # Errors
+///
+/// Returns [`SignError::CertificateValidation`] if any root certificate
+/// cannot be parsed.
+pub fn build_root_store(root_certs_der: &[Vec<u8>]) -> Result<RootCertStore, SignError> {
+    let mut store = RootCertStore::empty();
+    for der in root_certs_der {
+        let cert = CertificateDer::from(der.as_slice());
+        store.add(cert).map_err(|e| {
+            SignError::CertificateValidation(format!("invalid root certificate: {e}"))
+        })?;
+    }
+    Ok(store)
+}
+
+/// Build a [`RootCertStore`] pre-loaded with the Mozilla CA root certificates.
+///
+/// Uses the `webpki-roots` crate for a curated, up-to-date trust store.
+#[must_use]
+pub fn mozilla_root_store() -> RootCertStore {
+    let mut store = RootCertStore::empty();
+    store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    store
+}
+
+/// Validate a DER-encoded X.509 end-entity certificate against trusted root CAs.
+///
+/// RFC 5848 §4.2.6: Key blob type 'C' (PKIX) requires certificate path
+/// validation per RFC 5280 before the public key may be used for signature
+/// verification.
+///
+/// On success, returns the SPKI (Subject Public Key Info) DER bytes that can
+/// be used to extract the public key for [`VerifyingKey`](crate::signature::VerifyingKey).
+///
+/// # Arguments
+///
+/// * `end_entity_der` - DER-encoded end-entity certificate
+/// * `intermediates_der` - DER-encoded intermediate CA certificates (may be empty)
+/// * `trust_anchors` - Root certificate store
+///
+/// # Errors
+///
+/// Returns [`SignError::CertificateValidation`] if the certificate is invalid,
+/// expired, or cannot be verified against the trust anchors.
+pub fn validate_certificate(
+    end_entity_der: &[u8],
+    intermediates_der: &[Vec<u8>],
+    trust_anchors: &RootCertStore,
+) -> Result<Vec<u8>, SignError> {
+    use rustls::client::verify_server_cert_signed_by_trust_anchor;
+    use rustls::crypto::ring as rustls_ring;
+    use rustls::pki_types::UnixTime;
+
+    let ee_cert_der = CertificateDer::from(end_entity_der);
+    let parsed_cert = rustls::server::ParsedCertificate::try_from(&ee_cert_der).map_err(|e| {
+        SignError::CertificateValidation(format!("failed to parse end-entity certificate: {e}"))
+    })?;
+
+    let intermediates: Vec<CertificateDer<'_>> = intermediates_der
+        .iter()
+        .map(|d| CertificateDer::from(d.as_slice()))
+        .collect();
+
+    let provider = rustls_ring::default_provider();
+
+    // Verify the certificate chain against the trust anchors using the
+    // ring provider's supported signature verification algorithms.
+    verify_server_cert_signed_by_trust_anchor(
+        &parsed_cert,
+        trust_anchors,
+        &intermediates,
+        UnixTime::now(),
+        provider.signature_verification_algorithms.all,
+    )
+    .map_err(|e| {
+        SignError::CertificateValidation(format!("certificate path validation failed: {e}"))
+    })?;
+
+    // Extract the Subject Public Key Info from the validated certificate
+    let spki = parsed_cert.subject_public_key_info();
+    Ok(spki.as_ref().to_vec())
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -291,6 +379,99 @@ mod tests {
         if let Err(SignError::CertificateBlock(msg)) = &result {
             assert!(msg.contains("exceeds maximum"), "unexpected error: {msg}");
         }
+    }
+
+    #[test]
+    fn validate_self_signed_cert_rejected_without_trust() {
+        // A self-signed certificate should fail validation if not in the root store
+        let ca_cert = match rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let ee_cert = match rcgen::generate_simple_self_signed(vec!["syslog.local".to_owned()]) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+
+        let ee_der = ee_cert.cert.der().to_vec();
+
+        // Empty root store — nothing trusted
+        let empty_store = RootCertStore::empty();
+        let result = validate_certificate(&ee_der, &[], &empty_store);
+        assert!(
+            result.is_err(),
+            "self-signed cert should fail with empty root store"
+        );
+        if let Err(SignError::CertificateValidation(msg)) = &result {
+            assert!(
+                msg.contains("validation failed"),
+                "unexpected error message: {msg}"
+            );
+        }
+
+        // Root store with a *different* CA — should also fail
+        let ca_der = ca_cert.cert.der().to_vec();
+        let ca_store = match build_root_store(&[ca_der]) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let result = validate_certificate(&ee_der, &[], &ca_store);
+        assert!(result.is_err(), "cert signed by unknown CA should fail");
+    }
+
+    #[test]
+    fn validate_ca_signed_cert_accepted() {
+        // Create a CA and sign an end-entity cert with it
+        let mut ca_params = match rcgen::CertificateParams::new(vec!["Test CA".to_owned()]) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca_key = match rcgen::KeyPair::generate() {
+            Ok(k) => k,
+            Err(_) => return,
+        };
+        let ca_cert = match ca_params.self_signed(&ca_key) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+
+        let ee_params = match rcgen::CertificateParams::new(vec!["syslog.local".to_owned()]) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let ee_key = match rcgen::KeyPair::generate() {
+            Ok(k) => k,
+            Err(_) => return,
+        };
+        let ee_cert = match ee_params.signed_by(&ee_key, &ca_cert, &ca_key) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+
+        let ca_der = ca_cert.der().to_vec();
+        let ee_der = ee_cert.der().to_vec();
+
+        let root_store = match build_root_store(&[ca_der]) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let result = validate_certificate(&ee_der, &[], &root_store);
+        assert!(result.is_ok(), "CA-signed cert should validate: {result:?}");
+
+        // The returned SPKI bytes should be non-empty
+        let spki = match result {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        assert!(!spki.is_empty(), "SPKI bytes should not be empty");
+    }
+
+    #[test]
+    fn validate_invalid_der_rejected() {
+        let store = RootCertStore::empty();
+        let result = validate_certificate(b"not a certificate", &[], &store);
+        assert!(result.is_err(), "invalid DER should be rejected");
     }
 
     #[test]

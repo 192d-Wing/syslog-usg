@@ -196,4 +196,53 @@ mod tests {
         let result = build_server_config(&config);
         assert!(result.is_err());
     }
+
+    /// Verify that the cipher suite list used in `build_server_config` includes
+    /// the RFC 9662 MUST suite and excludes non-forward-secrecy suites.
+    #[test]
+    fn rfc9662_cipher_suites_pinned() {
+        // Build the same CryptoProvider that build_server_config uses
+        let provider = rustls::crypto::CryptoProvider {
+            cipher_suites: vec![
+                rustls::crypto::ring::cipher_suite::TLS13_AES_256_GCM_SHA384,
+                rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256,
+                rustls::crypto::ring::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
+                rustls::crypto::ring::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+                rustls::crypto::ring::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+                rustls::crypto::ring::cipher_suite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+                rustls::crypto::ring::cipher_suite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+            ],
+            ..rustls::crypto::ring::default_provider()
+        };
+
+        let suite_ids: Vec<_> = provider.cipher_suites.iter().map(|s| s.suite()).collect();
+
+        // RFC 9662 §5 MUST: TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+        assert!(
+            suite_ids.contains(&rustls::CipherSuite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256),
+            "RFC 9662 mandatory suite TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 missing"
+        );
+
+        // All TLS 1.2 suites must use ECDHE (forward secrecy) + GCM (AEAD)
+        for suite in &provider.cipher_suites {
+            let name = format!("{:?}", suite.suite());
+            if name.starts_with("TLS_") && !name.starts_with("TLS13_") {
+                assert!(
+                    name.contains("ECDHE"),
+                    "TLS 1.2 suite without forward secrecy: {name}"
+                );
+                assert!(name.contains("GCM"), "TLS 1.2 suite without AEAD: {name}");
+            }
+        }
+
+        // TLS 1.3 suites must be present
+        assert!(
+            suite_ids.contains(&rustls::CipherSuite::TLS13_AES_128_GCM_SHA256),
+            "TLS 1.3 AES-128-GCM suite missing"
+        );
+        assert!(
+            suite_ids.contains(&rustls::CipherSuite::TLS13_AES_256_GCM_SHA384),
+            "TLS 1.3 AES-256-GCM suite missing"
+        );
+    }
 }

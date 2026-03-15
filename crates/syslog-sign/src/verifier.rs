@@ -11,7 +11,10 @@
 
 use std::collections::HashMap;
 
+use rustls::RootCertStore;
+
 use crate::blocks::SignatureBlock;
+use crate::certificate;
 use crate::encode::encode_hash_block;
 use crate::error::SignError;
 use crate::hash::hash_message;
@@ -31,6 +34,25 @@ impl Verifier {
     #[must_use]
     pub fn new(key: VerifyingKey) -> Self {
         Self { key }
+    }
+
+    /// Create a verifier from a DER-encoded X.509 certificate, validated
+    /// against the provided trust anchors.
+    ///
+    /// RFC 5848 §4.2.6: Key blob type 'C' (PKIX) requires certificate path
+    /// validation per RFC 5280 before using the public key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SignError::CertificateValidation`] if the certificate is
+    /// invalid, expired, or not signed by a trusted CA.
+    pub fn from_validated_certificate(
+        cert_der: &[u8],
+        intermediates: &[Vec<u8>],
+        trust_anchors: &RootCertStore,
+    ) -> Result<Self, SignError> {
+        let spki_bytes = certificate::validate_certificate(cert_der, intermediates, trust_anchors)?;
+        Ok(Self::new(VerifyingKey::new(spki_bytes)))
     }
 
     /// Verify that a signature block's signature is valid.

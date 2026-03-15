@@ -50,6 +50,7 @@ pub mod verifier;
 
 // Re-export primary API types for convenience.
 pub use blocks::{CertificateBlock, SignatureBlock};
+pub use certificate::{build_root_store, mozilla_root_store, validate_certificate};
 pub use error::SignError;
 pub use signature::{SigningKey, VerifyingKey};
 pub use signer::{Signer, SignerConfig};
