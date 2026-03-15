@@ -687,9 +687,9 @@ fn build_signing_stage(config: &ServerConfig) -> Option<syslog_relay::SigningSta
         return None;
     }
 
-    // Load PKCS#8 DER-encoded private key
+    // Load PKCS#8 private key (PEM or DER auto-detected)
     check_key_file_permissions(&signing_cfg.key_path);
-    let key_bytes = match std::fs::read(&signing_cfg.key_path) {
+    let key_bytes = match load_pem_or_der(&signing_cfg.key_path) {
         Ok(b) => b,
         Err(e) => {
             error!(path = %signing_cfg.key_path, "failed to read signing key: {e}");
@@ -705,12 +705,12 @@ fn build_signing_stage(config: &ServerConfig) -> Option<syslog_relay::SigningSta
         }
     };
 
-    // Load optional DER-encoded X.509 certificate
+    // Load optional X.509 certificate (PEM or DER auto-detected)
     let cert_der =
         signing_cfg
             .cert_path
             .as_ref()
-            .and_then(|cert_path| match std::fs::read(cert_path) {
+            .and_then(|cert_path| match load_pem_or_der(cert_path) {
                 Ok(b) => {
                     info!(path = %cert_path, "loaded signing certificate");
                     Some(b)
@@ -793,7 +793,7 @@ fn build_verification_stage(config: &ServerConfig) -> Option<syslog_relay::Verif
     let mut verifiers = Vec::new();
 
     for key_path in &verif_cfg.trusted_key_paths {
-        let key_bytes = match std::fs::read(key_path) {
+        let key_bytes = match load_pem_or_der(key_path) {
             Ok(b) => b,
             Err(e) => {
                 error!(path = %key_path, "failed to read trusted key: {e}");
@@ -917,6 +917,32 @@ fn load_or_increment_rsid(state_dir: &str) -> syslog_sign::counter::RebootSessio
             RebootSessionId::unpersisted()
         }
     }
+}
+
+/// Load key or certificate material from a file, auto-detecting PEM vs DER.
+///
+/// If the file content starts with `-----BEGIN`, it is treated as PEM:
+/// headers are stripped and the base64 payload is decoded to DER bytes.
+/// Otherwise the raw bytes are returned as-is (assumed DER).
+fn load_pem_or_der(path: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine;
+
+    let raw = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+
+    // Check for PEM format
+    if let Ok(text) = std::str::from_utf8(&raw) {
+        if text.starts_with("-----BEGIN") {
+            let b64: String = text
+                .lines()
+                .filter(|l| !l.starts_with("-----"))
+                .collect();
+            return base64::engine::general_purpose::STANDARD
+                .decode(b64.trim())
+                .map_err(|e| format!("PEM base64 decode for {path}: {e}"));
+        }
+    }
+
+    Ok(raw)
 }
 
 /// Get the system hostname from the `HOSTNAME` environment variable.
