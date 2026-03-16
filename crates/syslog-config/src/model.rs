@@ -156,6 +156,10 @@ pub struct TlsConfig {
 
     /// Optional path to a CA bundle for verifying client certificates.
     pub ca_path: Option<String>,
+
+    /// Optional paths to PEM-encoded CRL files for certificate revocation checking (RFC 5425 §5.2).
+    #[serde(default)]
+    pub crl_paths: Vec<String>,
 }
 
 impl std::fmt::Debug for TlsConfig {
@@ -165,6 +169,7 @@ impl std::fmt::Debug for TlsConfig {
             .field("key_path", &"[REDACTED]")
             .field("client_auth", &self.client_auth)
             .field("ca_path", &self.ca_path)
+            .field("crl_paths", &self.crl_paths)
             .finish()
     }
 }

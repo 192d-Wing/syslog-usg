@@ -154,6 +154,17 @@ const RFC5424_VECTORS: &[&str] = &[
 ];
 
 // ---------------------------------------------------------------------------
+// Roundtrip test vectors for parse → serialize → re-parse fidelity
+// ---------------------------------------------------------------------------
+
+const ROUNDTRIP_VECTORS: &[&str] = &[
+    "<34>1 2003-10-11T22:14:15.003Z mymachine.example.com su - ID47 - BOM'su root' failed",
+    "<165>1 2003-08-24T05:14:15.000003-07:00 192.0.2.1 myproc 8710 - - %% It's time to make the do-nuts.",
+    "<0>1 - - - - - -",
+    "<13>1 2023-01-15T12:00:00Z myhost myapp 1234 ID47 [exampleSDID@32473 iut=\"3\" eventSource=\"Application\"] hello",
+];
+
+// ---------------------------------------------------------------------------
 // Differential test: syslog_parse vs syslog_rfc5424 on known vectors
 // ---------------------------------------------------------------------------
 
@@ -542,6 +553,179 @@ fn differential_all_pri_values() {
             }
             (Err(_), Err(_)) => {
                 panic!("PRI {pri}: both reject — unexpected for valid PRI");
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parse-serialize roundtrip fidelity test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn roundtrip_fidelity() {
+    use syslog_proto::SyslogTimestamp;
+
+    for (i, &input) in ROUNDTRIP_VECTORS.iter().enumerate() {
+        // Step 1: Parse the original message
+        let mut parsed1 = syslog_parse::parse_strict(input.as_bytes())
+            .unwrap_or_else(|e| panic!("vector {i}: first parse failed: {e:?}\n  input: {input}"));
+
+        // Step 2: Clear raw to force reconstruction
+        parsed1.raw = None;
+
+        // Step 3: Serialize
+        let serialized = syslog_parse::rfc5424::serializer::serialize(&parsed1);
+
+        // Step 4: Re-parse the serialized output
+        let parsed2 = syslog_parse::parse_strict(&serialized).unwrap_or_else(|e| {
+            panic!(
+                "vector {i}: re-parse failed: {e:?}\n  serialized: {}",
+                String::from_utf8_lossy(&serialized)
+            )
+        });
+
+        // Step 5: Compare all fields
+        assert_eq!(
+            our_facility_code(parsed1.facility),
+            our_facility_code(parsed2.facility),
+            "vector {i}: facility mismatch after roundtrip"
+        );
+        assert_eq!(
+            our_severity_code(parsed1.severity),
+            our_severity_code(parsed2.severity),
+            "vector {i}: severity mismatch after roundtrip"
+        );
+        assert_eq!(
+            parsed1.version, parsed2.version,
+            "vector {i}: version mismatch after roundtrip"
+        );
+
+        // Compare timestamps via Display (precision differences are acceptable in RFC 3339)
+        match (&parsed1.timestamp, &parsed2.timestamp) {
+            (SyslogTimestamp::Nil, SyslogTimestamp::Nil) => {}
+            (SyslogTimestamp::Value(_), SyslogTimestamp::Value(_)) => {
+                assert_eq!(
+                    format!("{}", parsed1.timestamp),
+                    format!("{}", parsed2.timestamp),
+                    "vector {i}: timestamp mismatch after roundtrip"
+                );
+            }
+            _ => panic!(
+                "vector {i}: timestamp variant mismatch: {:?} vs {:?}",
+                parsed1.timestamp, parsed2.timestamp
+            ),
+        }
+
+        assert_eq!(
+            parsed1.hostname, parsed2.hostname,
+            "vector {i}: hostname mismatch after roundtrip"
+        );
+        assert_eq!(
+            parsed1.app_name, parsed2.app_name,
+            "vector {i}: app_name mismatch after roundtrip"
+        );
+        assert_eq!(
+            parsed1.proc_id, parsed2.proc_id,
+            "vector {i}: proc_id mismatch after roundtrip"
+        );
+        assert_eq!(
+            parsed1.msg_id, parsed2.msg_id,
+            "vector {i}: msg_id mismatch after roundtrip"
+        );
+
+        // Compare structured data
+        let sd1_count = parsed1.structured_data.iter().count();
+        let sd2_count = parsed2.structured_data.iter().count();
+        assert_eq!(
+            sd1_count, sd2_count,
+            "vector {i}: SD element count mismatch after roundtrip"
+        );
+        for el1 in parsed1.structured_data.iter() {
+            let sd_id = el1.id.as_str();
+            let el2 = parsed2
+                .structured_data
+                .iter()
+                .find(|e| e.id.as_str() == sd_id);
+            assert!(
+                el2.is_some(),
+                "vector {i}: SD-ID '{sd_id}' missing after roundtrip"
+            );
+            let el2 = el2.unwrap();
+            assert_eq!(
+                el1.params.len(),
+                el2.params.len(),
+                "vector {i}: SD-ID '{sd_id}' param count mismatch after roundtrip"
+            );
+            for (p1, p2) in el1.params.iter().zip(el2.params.iter()) {
+                assert_eq!(
+                    p1.name, p2.name,
+                    "vector {i}: SD param name mismatch in '{sd_id}'"
+                );
+                assert_eq!(
+                    p1.value, p2.value,
+                    "vector {i}: SD param value mismatch in '{sd_id}.{}'",
+                    p1.name
+                );
+            }
+        }
+
+        // Compare message body
+        assert_eq!(
+            parsed1.msg, parsed2.msg,
+            "vector {i}: msg body mismatch after roundtrip"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Timestamp fractional-second edge case tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn timestamp_fractional_seconds() {
+    use syslog_proto::SyslogTimestamp;
+    use time::Month;
+
+    let fractional_cases = [
+        "<0>1 2023-01-15T12:00:00Z - - - - -",
+        "<0>1 2023-01-15T12:00:00.1Z - - - - -",
+        "<0>1 2023-01-15T12:00:00.12Z - - - - -",
+        "<0>1 2023-01-15T12:00:00.123Z - - - - -",
+        "<0>1 2023-01-15T12:00:00.123456Z - - - - -",
+        "<0>1 2023-01-15T12:00:00.123456789Z - - - - -",
+    ];
+
+    for input in &fractional_cases {
+        let parsed = syslog_parse::parse_strict(input.as_bytes())
+            .unwrap_or_else(|e| panic!("parse failed for: {input}\n  error: {e:?}"));
+
+        match &parsed.timestamp {
+            SyslogTimestamp::Nil => panic!("expected timestamp Value, got Nil for: {input}"),
+            SyslogTimestamp::Value(dt) => {
+                assert_eq!(dt.year(), 2023, "year mismatch for: {input}");
+                assert_eq!(dt.month(), Month::January, "month mismatch for: {input}");
+                assert_eq!(dt.day(), 15, "day mismatch for: {input}");
+            }
+        }
+    }
+
+    // Timezone variant tests
+    let tz_cases = [
+        "<0>1 2023-01-15T12:00:00+05:30 - - - - -",
+        "<0>1 2023-01-15T12:00:00-07:00 - - - - -",
+    ];
+
+    for input in &tz_cases {
+        let parsed = syslog_parse::parse_strict(input.as_bytes())
+            .unwrap_or_else(|e| panic!("parse failed for: {input}\n  error: {e:?}"));
+
+        match &parsed.timestamp {
+            SyslogTimestamp::Nil => panic!("expected timestamp Value, got Nil for: {input}"),
+            SyslogTimestamp::Value(dt) => {
+                assert_eq!(dt.year(), 2023, "year mismatch for: {input}");
+                assert_eq!(dt.month(), Month::January, "month mismatch for: {input}");
+                assert_eq!(dt.day(), 15, "day mismatch for: {input}");
             }
         }
     }

@@ -228,6 +228,7 @@ async fn main() {
                 key_path: tls_cfg.key_path.clone(),
                 client_auth: tls_cfg.client_auth,
                 client_ca_path: tls_cfg.ca_path.clone(),
+                crl_paths: tls_cfg.crl_paths.clone(),
             };
             let tls_server_config = match syslog_transport::tls::build_server_config(&transport_tls)
             {
@@ -602,6 +603,7 @@ fn start_listeners(
                         key_path: tls_cfg.key_path.clone(),
                         client_auth: tls_cfg.client_auth,
                         client_ca_path: tls_cfg.ca_path.clone(),
+                        crl_paths: tls_cfg.crl_paths.clone(),
                     };
 
                     match syslog_transport::tls::build_server_config(&transport_tls) {

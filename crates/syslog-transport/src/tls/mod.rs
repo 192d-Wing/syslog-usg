@@ -8,8 +8,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use rustls::ServerConfig;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
-use rustls::server::WebPkiClientVerifier;
+use rustls::pki_types::{
+    CertificateDer, CertificateRevocationListDer, PrivateKeyDer, pem::PemObject,
+};
+use rustls::server::{ServerSessionMemoryCache, WebPkiClientVerifier};
 use tracing::{debug, info};
 
 use crate::error::TransportError;
@@ -25,6 +27,8 @@ pub struct TlsConfig {
     pub client_auth: bool,
     /// Optional path to the CA certificate for client verification.
     pub client_ca_path: Option<String>,
+    /// Optional paths to PEM-encoded CRL files for client certificate revocation checking.
+    pub crl_paths: Vec<String>,
 }
 
 /// Build a `rustls::ServerConfig` from the provided TLS configuration.
@@ -71,7 +75,7 @@ pub fn build_server_config(config: &TlsConfig) -> Result<Arc<ServerConfig>, Tran
         .with_protocol_versions(&[&rustls::version::TLS12, &rustls::version::TLS13])
         .map_err(|e| TransportError::InvalidFrame(format!("TLS version config failed: {e}")))?;
 
-    let server_config = if config.client_auth {
+    let mut server_config = if config.client_auth {
         // RFC 5425 §5.2: mutual TLS — require and verify client certificates
         // Safety: validated above that client_ca_path is Some
         let ca_path = config.client_ca_path.as_deref().ok_or_else(|| {
@@ -86,11 +90,18 @@ pub fn build_server_config(config: &TlsConfig) -> Result<Arc<ServerConfig>, Tran
             })?;
         }
 
-        let verifier = WebPkiClientVerifier::builder(Arc::new(root_store))
-            .build()
-            .map_err(|e| {
-                TransportError::InvalidFrame(format!("failed to build client cert verifier: {e}"))
-            })?;
+        // RFC 5425 §5.2 SHOULD: load CRLs for client certificate revocation checking
+        let crls = load_crls(&config.crl_paths)?;
+
+        let mut verifier_builder = WebPkiClientVerifier::builder(Arc::new(root_store));
+        if !crls.is_empty() {
+            verifier_builder =
+                verifier_builder.with_crls(crls).allow_unknown_revocation_status();
+            info!("CRL revocation checking enabled ({} CRL file(s) loaded)", config.crl_paths.len());
+        }
+        let verifier = verifier_builder.build().map_err(|e| {
+            TransportError::InvalidFrame(format!("failed to build client cert verifier: {e}"))
+        })?;
 
         info!("mTLS enabled: client certificate verification required");
 
@@ -107,8 +118,10 @@ pub fn build_server_config(config: &TlsConfig) -> Result<Arc<ServerConfig>, Tran
 
     // RFC 5425 §5.2: ALPN is not defined for syslog-over-TLS
     // RFC 9662: 0-RTT MUST be disabled — rustls doesn't support 0-RTT on server by default
+    // RFC 5425 §5.3: enable session resumption with bounded cache
+    server_config.session_storage = ServerSessionMemoryCache::new(1024);
 
-    info!("TLS server configuration loaded (RFC 9662 cipher suites enforced)");
+    info!("TLS server configuration loaded (RFC 9662 cipher suites enforced, session cache enabled)");
 
     Ok(Arc::new(server_config))
 }
@@ -139,6 +152,35 @@ pub fn load_certs(path: &str) -> Result<Vec<CertificateDer<'static>>, TransportE
     Ok(certs)
 }
 
+/// Load PEM-encoded CRLs from the given file paths.
+///
+/// RFC 5425 §5.2 SHOULD: support certificate revocation checking via CRLs.
+fn load_crls(
+    paths: &[String],
+) -> Result<Vec<CertificateRevocationListDer<'static>>, TransportError> {
+    let mut all_crls = Vec::new();
+    for path in paths {
+        let crls = CertificateRevocationListDer::pem_file_iter(Path::new(path))
+            .map_err(|e| {
+                debug!(path = %path, error = %e, "failed to open CRL file");
+                TransportError::Io(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "failed to open CRL file",
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                debug!(path = %path, error = %e, "invalid CRL data");
+                TransportError::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid CRL data",
+                ))
+            })?;
+        all_crls.extend(crls);
+    }
+    Ok(all_crls)
+}
+
 /// Load a PEM-encoded private key from a file. Accepts PKCS#8, PKCS#1, or SEC1 keys.
 fn load_private_key(path: &str) -> Result<PrivateKeyDer<'static>, TransportError> {
     PrivateKeyDer::from_pem_file(Path::new(path)).map_err(|e| {
@@ -161,6 +203,7 @@ mod tests {
             key_path: "nonexistent.key".to_owned(),
             client_auth: true,
             client_ca_path: None,
+            crl_paths: vec![],
         };
         let result = build_server_config(&config);
         assert!(result.is_err());
@@ -180,6 +223,7 @@ mod tests {
             key_path: "nonexistent.key".to_owned(),
             client_auth: true,
             client_ca_path: Some("/nonexistent/ca.pem".to_owned()),
+            crl_paths: vec![],
         };
         let result = build_server_config(&config);
         assert!(result.is_err());
@@ -192,6 +236,7 @@ mod tests {
             key_path: "nonexistent.key".to_owned(),
             client_auth: false,
             client_ca_path: None,
+            crl_paths: vec![],
         };
         let result = build_server_config(&config);
         assert!(result.is_err());

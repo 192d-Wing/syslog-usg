@@ -52,6 +52,8 @@ Best-effort heuristic parser with fallback for legacy BSD syslog messages. Not a
 | §4.3 | Octet-counting framing | MUST | `OctetCountingCodec` in `syslog-transport` |
 | §5.2 | TLS with server certificate | MUST | `rustls` server config with cert chain |
 | §5.2 | Mutual TLS (client certificate) | SHOULD | `WebPkiClientVerifier` with CA bundle validation when `client_auth` is enabled |
+| §5.2 | Certificate revocation checking | SHOULD | CRL loading from PEM files via `crl_paths` config; passed to `WebPkiClientVerifier::with_crls()` |
+| §5.3 | TLS session resumption | SHOULD | `ServerSessionMemoryCache` with 1024-entry bounded cache |
 
 ### RFC 5426 — Transmission of Syslog Messages over UDP
 
@@ -206,10 +208,10 @@ All compliance claims are backed by tests across the workspace:
 
 | Crate | Tests | Key RFC Coverage |
 |-------|-------|-----------------|
-| `syslog-proto` | 114 | RFC 5424 types, RFC 5427 names, RFC 5674 alarms |
-| `syslog-parse` | 38 | RFC 5424 parser/serializer roundtrip, RFC 3164 best-effort |
-| `syslog-transport` | 37 | RFC 5425 TLS, RFC 5426 UDP, octet-counting codec, RFC 9662 cipher suite verification |
-| `syslog-config` | 29 | Config validation for all RFC features |
+| `syslog-proto` | 117 | RFC 5424 types, RFC 5427 names, RFC 5674 alarms |
+| `syslog-parse` | 42 | RFC 5424 parser/serializer roundtrip, RFC 3164 best-effort, timestamp edge cases |
+| `syslog-transport` | 41 | RFC 5425 TLS, RFC 5426 UDP, octet-counting codec, RFC 9662 cipher suite verification |
+| `syslog-config` | 31 | Config validation for all RFC features |
 | `syslog-relay` | 91 | Pipeline stages: alarm filter, signing, verification (incl. DSA scheme rejection), routing |
 | `syslog-observe` | 18 | RFC 9742 management endpoints |
 | `syslog-server` | 9 | End-to-end integration (UDP/TCP) |

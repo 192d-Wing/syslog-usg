@@ -166,6 +166,9 @@ fn validate(config: &ServerConfig) -> Result<(), ConfigError> {
             if let Some(ref ca) = tls.ca_path {
                 validate_path(ca, &format!("listeners[{i}].tls.ca_path"))?;
             }
+            for (j, crl) in tls.crl_paths.iter().enumerate() {
+                validate_path(crl, &format!("listeners[{i}].tls.crl_paths[{j}]"))?;
+            }
         }
         if listener.protocol == ListenerProtocol::Dtls && listener.tls.is_none() {
             return Err(ConfigError::Validation(format!(
@@ -200,6 +203,9 @@ fn validate(config: &ServerConfig) -> Result<(), ConfigError> {
             validate_path(&tls.key_path, &format!("outputs[{i}].tls.key_path"))?;
             if let Some(ref ca) = tls.ca_path {
                 validate_path(ca, &format!("outputs[{i}].tls.ca_path"))?;
+            }
+            for (j, crl) in tls.crl_paths.iter().enumerate() {
+                validate_path(crl, &format!("outputs[{i}].tls.crl_paths[{j}]"))?;
             }
         }
         if output.protocol == OutputProtocol::Dtls && output.tls.is_none() {
@@ -427,6 +433,9 @@ fn validate(config: &ServerConfig) -> Result<(), ConfigError> {
         validate_path(&tls.key_path, "metrics.tls.key_path")?;
         if let Some(ref ca) = tls.ca_path {
             validate_path(ca, "metrics.tls.ca_path")?;
+        }
+        for (j, crl) in tls.crl_paths.iter().enumerate() {
+            validate_path(crl, &format!("metrics.tls.crl_paths[{j}]"))?;
         }
     }
 
