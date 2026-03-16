@@ -258,7 +258,7 @@ mod tests {
         let mut signer = Signer::new(key, rsid, config);
 
         // Feed a message to get a sig block
-        let block = match signer.add_message(b"test data") {
+        let block = match signer.add_message(b"test data", None) {
             Ok(Some(b)) => b,
             _ => return None,
         };

@@ -480,8 +480,14 @@ fn start_listeners(
 
         match listener_cfg.protocol {
             ListenerProtocol::Udp => {
+                let allowed_sources: std::collections::HashSet<std::net::IpAddr> = listener_cfg
+                    .allowed_sources
+                    .iter()
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
                 let udp_config = UdpListenerConfig {
                     bind_addr: addr,
+                    allowed_sources,
                     ..Default::default()
                 };
 
@@ -619,6 +625,11 @@ fn start_listeners(
 
                 let proto_label = if tls_acceptor.is_some() { "TLS" } else { "TCP" };
 
+                let allowed_sources: std::collections::HashSet<std::net::IpAddr> = listener_cfg
+                    .allowed_sources
+                    .iter()
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
                 let tcp_config = TcpListenerConfig {
                     bind_addr: addr,
                     max_frame_size: config.pipeline.max_message_size,
@@ -629,6 +640,9 @@ fn start_listeners(
                         .read_timeout_secs
                         .map(std::time::Duration::from_secs),
                     idle_timeout: None,
+                    allowed_sources,
+                    use_lf_framing: listener_cfg.framing
+                        == syslog_config::model::FramingMode::LineFeed,
                 };
 
                 let (tcp_tx, mut tcp_rx) =

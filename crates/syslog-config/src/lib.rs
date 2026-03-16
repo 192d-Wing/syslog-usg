@@ -10,7 +10,7 @@ pub mod model;
 use std::path::Path;
 
 use crate::error::ConfigError;
-use crate::model::{ActionTypeConfig, ListenerProtocol, OutputProtocol, ServerConfig};
+use crate::model::{ActionTypeConfig, FramingMode, ListenerProtocol, OutputProtocol, ServerConfig};
 
 /// Load a [`ServerConfig`] from a TOML file at `path`.
 ///
@@ -170,6 +170,14 @@ fn validate(config: &ServerConfig) -> Result<(), ConfigError> {
                 validate_path(crl, &format!("listeners[{i}].tls.crl_paths[{j}]"))?;
             }
         }
+        // RFC 5426 §3.5 MAY: validate allowed_sources entries are valid IPs.
+        for (j, ip_str) in listener.allowed_sources.iter().enumerate() {
+            if ip_str.parse::<std::net::IpAddr>().is_err() {
+                return Err(ConfigError::Validation(format!(
+                    "listeners[{i}].allowed_sources[{j}]: invalid IP address {ip_str:?}"
+                )));
+            }
+        }
         if listener.protocol == ListenerProtocol::Dtls && listener.tls.is_none() {
             return Err(ConfigError::Validation(format!(
                 "listeners[{i}]: DTLS protocol requires a [tls] section"
@@ -180,6 +188,12 @@ fn validate(config: &ServerConfig) -> Result<(), ConfigError> {
                 "listeners[{i}]: DTLS currently falls back to plaintext UDP — \
                  set dtls_plaintext_fallback = true to acknowledge this, \
                  or use network-level encryption (IPsec/WireGuard)"
+            )));
+        }
+        // RFC 6587 §3.4.2: LF-delimited framing only applies to stream transports.
+        if listener.framing == FramingMode::LineFeed && listener.protocol == ListenerProtocol::Udp {
+            return Err(ConfigError::Validation(format!(
+                "listeners[{i}]: line-feed framing is only supported for TCP/TLS, not UDP"
             )));
         }
     }
@@ -269,11 +283,36 @@ fn validate(config: &ServerConfig) -> Result<(), ConfigError> {
             }
             if let Some(ref sg) = signing.signature_group {
                 match sg.as_str() {
-                    "global" => {} // Only SG=0 is implemented
-                    "per-pri" | "pri-ranges" | "custom" => {
+                    "global" | "per-pri" => {}
+                    "pri-ranges" => {
+                        // RFC 5848 §4.2.3 SG=2: Validate PRI range configuration.
+                        if signing.pri_ranges.is_empty() {
+                            return Err(ConfigError::Validation(
+                                "signing.pri_ranges must not be empty when \
+                                 signature_group = \"pri-ranges\""
+                                    .to_owned(),
+                            ));
+                        }
+                        for (i, range) in signing.pri_ranges.iter().enumerate() {
+                            if range.start > range.end {
+                                return Err(ConfigError::Validation(format!(
+                                    "signing.pri_ranges[{i}]: start ({}) must be <= end ({})",
+                                    range.start, range.end
+                                )));
+                            }
+                            if range.end > 191 {
+                                return Err(ConfigError::Validation(format!(
+                                    "signing.pri_ranges[{i}]: end ({}) must be <= 191",
+                                    range.end
+                                )));
+                            }
+                        }
+                    }
+                    "custom" => {
                         return Err(ConfigError::Validation(format!(
                             "signing.signature_group: {sg:?} is recognized but not yet \
-                             implemented; only \"global\" is currently supported"
+                             implemented; only \"global\", \"per-pri\", and \
+                             \"pri-ranges\" are currently supported"
                         )));
                     }
                     _ => {
@@ -720,7 +759,7 @@ max_message_size = 0
     }
 
     #[test]
-    fn test_signing_unsupported_sg_mode_rejected() {
+    fn test_signing_per_pri_sg_mode_accepted() {
         let toml = r#"
 [signing]
 enabled = true
@@ -729,8 +768,103 @@ signature_group = "per-pri"
 "#;
         let result = load_config_str(toml);
         assert!(
+            result.is_ok(),
+            "per-pri SG mode should be accepted: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_signing_pri_ranges_sg_mode_accepted() {
+        let toml = r#"
+[signing]
+enabled = true
+key_path = "/etc/ssl/sign.key"
+signature_group = "pri-ranges"
+
+[[signing.pri_ranges]]
+start = 0
+end = 63
+group_id = 1
+
+[[signing.pri_ranges]]
+start = 64
+end = 191
+group_id = 2
+"#;
+        let result = load_config_str(toml);
+        assert!(
+            result.is_ok(),
+            "pri-ranges SG mode should be accepted: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_signing_pri_ranges_empty_rejected() {
+        let toml = r#"
+[signing]
+enabled = true
+key_path = "/etc/ssl/sign.key"
+signature_group = "pri-ranges"
+"#;
+        let result = load_config_str(toml);
+        assert!(
+            matches!(result, Err(ConfigError::Validation(ref msg)) if msg.contains("pri_ranges must not be empty")),
+            "expected empty pri_ranges error, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_signing_pri_ranges_invalid_range_rejected() {
+        let toml = r#"
+[signing]
+enabled = true
+key_path = "/etc/ssl/sign.key"
+signature_group = "pri-ranges"
+
+[[signing.pri_ranges]]
+start = 100
+end = 50
+group_id = 1
+"#;
+        let result = load_config_str(toml);
+        assert!(
+            matches!(result, Err(ConfigError::Validation(ref msg)) if msg.contains("start") && msg.contains("end")),
+            "expected start > end error, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_signing_pri_ranges_out_of_bounds_rejected() {
+        let toml = r#"
+[signing]
+enabled = true
+key_path = "/etc/ssl/sign.key"
+signature_group = "pri-ranges"
+
+[[signing.pri_ranges]]
+start = 0
+end = 200
+group_id = 1
+"#;
+        let result = load_config_str(toml);
+        assert!(
+            matches!(result, Err(ConfigError::Validation(ref msg)) if msg.contains("191")),
+            "expected out-of-bounds error, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_signing_custom_sg_mode_rejected() {
+        let toml = r#"
+[signing]
+enabled = true
+key_path = "/etc/ssl/sign.key"
+signature_group = "custom"
+"#;
+        let result = load_config_str(toml);
+        assert!(
             matches!(result, Err(ConfigError::Validation(ref msg)) if msg.contains("not yet implemented")),
-            "expected 'not yet implemented' error for per-pri, got {result:?}"
+            "expected 'not yet implemented' error for custom, got {result:?}"
         );
     }
 
@@ -743,7 +877,10 @@ key_path = "/etc/ssl/sign.key"
 signature_group = "global"
 "#;
         let result = load_config_str(toml);
-        assert!(result.is_ok(), "global SG mode should be accepted: {result:?}");
+        assert!(
+            result.is_ok(),
+            "global SG mode should be accepted: {result:?}"
+        );
     }
 
     // -- env var integration in config loading --------------------------------
@@ -766,6 +903,64 @@ signature_group = "global"
         let result = load_config(Path::new("/tmp/__nonexistent_syslog_cfg__.toml"));
         assert!(result.is_err());
         assert!(matches!(result, Err(ConfigError::ReadFile(_))));
+    }
+
+    #[test]
+    fn test_allowed_sources_invalid_ip_rejected() {
+        let toml = r#"
+[[listeners]]
+protocol = "udp"
+bind_address = "0.0.0.0:514"
+allowed_sources = ["not-an-ip"]
+"#;
+        let result = load_config_str(toml);
+        assert!(
+            matches!(result, Err(ConfigError::Validation(ref msg)) if msg.contains("invalid IP")),
+            "expected validation error for invalid IP, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_allowed_sources_valid_accepted() {
+        let toml = r#"
+[[listeners]]
+protocol = "udp"
+bind_address = "0.0.0.0:514"
+allowed_sources = ["192.168.1.1", "10.0.0.1", "::1"]
+"#;
+        let result = load_config_str(toml);
+        assert!(result.is_ok(), "valid IPs should be accepted: {result:?}");
+    }
+
+    #[test]
+    fn test_allowed_sources_empty_accepted() {
+        let toml = r#"
+[[listeners]]
+protocol = "udp"
+bind_address = "0.0.0.0:514"
+allowed_sources = []
+"#;
+        let result = load_config_str(toml);
+        assert!(
+            result.is_ok(),
+            "empty allowed_sources should be accepted: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_allowed_sources_default_omitted() {
+        let toml = r#"
+[[listeners]]
+protocol = "udp"
+bind_address = "0.0.0.0:514"
+"#;
+        let cfg = load_config_str(toml);
+        assert!(cfg.is_ok());
+        if let Ok(cfg) = cfg {
+            if let Some(listener) = cfg.listeners.first() {
+                assert!(listener.allowed_sources.is_empty());
+            }
+        }
     }
 
     #[test]

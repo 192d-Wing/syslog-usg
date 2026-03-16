@@ -17,6 +17,6 @@ pub use dtls::{
     DtlsDatagram, DtlsError, DtlsListenerConfig, DtlsSession, DtlsVersion, run_dtls_listener,
 };
 pub use error::TransportError;
-pub use framing::OctetCountingCodec;
+pub use framing::{LfDelimitedCodec, OctetCountingCodec, SyslogCodec};
 pub use tcp::{TcpListenerConfig, TcpMessage, run_tcp_listener};
 pub use udp::{UdpDatagram, UdpListenerConfig, run_udp_listener};

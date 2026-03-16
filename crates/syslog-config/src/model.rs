@@ -97,6 +97,21 @@ pub enum ListenerProtocol {
     Dtls,
 }
 
+/// TCP framing mode for syslog messages.
+///
+/// Selects between the two framing methods defined in RFC 6587:
+/// - Octet counting (§3.4.1): length-prefixed frames
+/// - Line feed (§3.4.2): LF-delimited (non-transparent) framing
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FramingMode {
+    /// RFC 5425 §4.3 / RFC 6587 §3.4.1: MSG-LEN SP SYSLOG-MSG
+    #[default]
+    OctetCounting,
+    /// RFC 6587 §3.4.2: messages delimited by LF
+    LineFeed,
+}
+
 /// Configuration for a single listener (inbound socket).
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct ListenerConfig {
@@ -131,6 +146,16 @@ pub struct ListenerConfig {
     /// refuse to start. This prevents accidental unencrypted operation.
     #[serde(default)]
     pub dtls_plaintext_fallback: bool,
+
+    /// Optional list of allowed source IP addresses (RFC 5426 §3.5 MAY).
+    /// If non-empty, only messages from these IPs are accepted; others are dropped.
+    #[serde(default)]
+    pub allowed_sources: Vec<String>,
+
+    /// TCP framing mode (default: octet-counting).
+    /// Only applies to TCP and TLS listeners.
+    #[serde(default)]
+    pub framing: FramingMode,
 }
 
 fn default_max_connections() -> Option<usize> {
@@ -311,6 +336,25 @@ pub struct SigningConfig {
     /// Directory for persisting signing state (RSID). Optional — if not set,
     /// RSID=0 is used per RFC 5848 §4.2.4.
     pub state_dir: Option<String>,
+
+    /// PRI ranges for signature group mode "pri-ranges" (SG=2).
+    /// Each entry maps a [start, end] PRI interval to a group ID.
+    /// Required when `signature_group = "pri-ranges"`.
+    #[serde(default)]
+    pub pri_ranges: Vec<PriRangeConfig>,
+}
+
+/// A PRI range mapping for SG=2 (pri-ranges) signature group mode.
+///
+/// RFC 5848 §4.2.3: Contiguous PRI ranges mapped to distinct signature groups.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct PriRangeConfig {
+    /// Start of the PRI range (inclusive, 0-191).
+    pub start: u8,
+    /// End of the PRI range (inclusive, 0-191).
+    pub end: u8,
+    /// Group ID for this range.
+    pub group_id: u8,
 }
 
 impl std::fmt::Debug for SigningConfig {
@@ -324,6 +368,7 @@ impl std::fmt::Debug for SigningConfig {
             .field("max_hashes_per_block", &self.max_hashes_per_block)
             .field("cert_emit_interval_secs", &self.cert_emit_interval_secs)
             .field("state_dir", &self.state_dir)
+            .field("pri_ranges", &self.pri_ranges)
             .finish()
     }
 }

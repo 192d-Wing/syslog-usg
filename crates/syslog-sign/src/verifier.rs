@@ -319,9 +319,9 @@ mod tests {
             Some(v) => v,
             None => return,
         };
-        signer.add_message(b"msg1").ok();
-        signer.add_message(b"msg2").ok();
-        let block = signer.add_message(b"msg3").ok().flatten();
+        signer.add_message(b"msg1", None).ok();
+        signer.add_message(b"msg2", None).ok();
+        let block = signer.add_message(b"msg3", None).ok().flatten();
 
         assert!(block.is_some());
         if let Some(block) = &block {
@@ -339,9 +339,9 @@ mod tests {
             Some(v) => v,
             None => return,
         };
-        signer.add_message(b"a").ok();
-        signer.add_message(b"b").ok();
-        let block = signer.add_message(b"c").ok().flatten();
+        signer.add_message(b"a", None).ok();
+        signer.add_message(b"b", None).ok();
+        let block = signer.add_message(b"c", None).ok().flatten();
 
         if let Some(block) = &block {
             let result = verifier.verify_full(block, &[b"a", b"b", b"c"]);
@@ -355,9 +355,9 @@ mod tests {
             Some(v) => v,
             None => return,
         };
-        signer.add_message(b"original").ok();
-        signer.add_message(b"also original").ok();
-        let block = signer.add_message(b"third").ok().flatten();
+        signer.add_message(b"original", None).ok();
+        signer.add_message(b"also original", None).ok();
+        let block = signer.add_message(b"third", None).ok().flatten();
 
         if let Some(block) = &block {
             let result = verifier.verify_messages(block, &[b"original", b"TAMPERED", b"third"]);
@@ -371,9 +371,9 @@ mod tests {
             Some(v) => v,
             None => return,
         };
-        signer.add_message(b"x").ok();
-        signer.add_message(b"y").ok();
-        let block = signer.add_message(b"z").ok().flatten();
+        signer.add_message(b"x", None).ok();
+        signer.add_message(b"y", None).ok();
+        let block = signer.add_message(b"z", None).ok().flatten();
 
         // Create a different verifier with a new key
         let (other_key, _) = match SigningKey::generate() {
@@ -394,9 +394,9 @@ mod tests {
             Some(v) => v,
             None => return,
         };
-        signer.add_message(b"a").ok();
-        signer.add_message(b"b").ok();
-        let block = signer.add_message(b"c").ok().flatten();
+        signer.add_message(b"a", None).ok();
+        signer.add_message(b"b", None).ok();
+        let block = signer.add_message(b"c", None).ok().flatten();
 
         if let Some(block) = &block {
             // Too few messages
@@ -415,8 +415,12 @@ mod tests {
             Some(v) => v,
             None => return,
         };
-        signer.add_message(b"only_one").ok();
-        let block = signer.flush().ok().flatten();
+        signer.add_message(b"only_one", None).ok();
+        let blocks = match signer.flush() {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+        let block = blocks.into_iter().next();
 
         if let Some(block) = &block {
             assert_eq!(block.cnt, 1);

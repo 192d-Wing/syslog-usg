@@ -112,7 +112,7 @@ Configuration is accepted but the listener is skipped at runtime. See security r
 | §4.2 | VER field (version + hash algo + signature scheme) | MUST | `SignatureBlock` type with `Version`, `HashAlgorithm`, `SignatureScheme` |
 | §4.2.1 | SHA-1 and SHA-256 hash algorithms | SHOULD/MUST | Both implemented via `ring` |
 | §4.2.2 | DSA-based signature scheme | MUST | **Deviation:** ECDSA P-256 via `ring` (scheme=2) instead of OpenPGP DSA (scheme=1). Incoming DSA signatures are logged as warnings and rejected. See deviations below. |
-| §4.2.3 | Signature Group (SG) modes 0–3 | MUST | Types defined for all 4 modes. Only SG=0 (Global) is wired for signing; SG=1/2/3 are parsed but not functionally supported in the pipeline. |
+| §4.2.3 | Signature Group (SG) modes 0–3 | MUST | SG=0 (Global), SG=1 (PerPri), and SG=2 (PriRanges) are fully implemented with per-group hash chains. SG=3 (Custom) falls back to global signing. |
 | §4.2.4 | Restart Sequence ID (RSID), 0–9999999999 | MUST | Validated range in type |
 | §4.2.5 | Global Block Counter (GBC), wrapping | MUST | Counter with wrap-around |
 | §4.2.6 | Key Blob Type — PKIX certificates (RFC 5280) | MUST | Certificate loading, fragmentation, and X.509 path validation via `rustls`/`webpki` |
@@ -125,7 +125,7 @@ Signing and verification are integrated as pipeline stages in `syslog-relay`.
 
 1. **ECDSA P-256 instead of DSA (§4.2.2):** RFC 5848 mandates OpenPGP DSA (scheme=1) as the mandatory-to-implement signature scheme. This implementation uses ECDSA P-256 (scheme=2) instead. DSA was deprecated by NIST in 2018; ECDSA P-256 provides equivalent or stronger security with constant-time operations via `ring`. Incoming DSA-signed messages are logged with a warning and rejected. This deviation breaks interoperability with peers using the original DSA scheme.
 
-2. **Signature groups SG=1/2/3 (§4.2.3):** Per-PRI (SG=1), PRI-ranges (SG=2), and custom (SG=3) grouping modes are type-defined and can be parsed, but only SG=0 (Global) is functionally wired in the signing pipeline. All messages are signed in a single global group. Configuration validation rejects SG modes 1-3 with an explicit error.
+2. **Signature group SG=3 (§4.2.3):** Custom grouping (SG=3) is parsed but falls back to global (SG=0) signing. SG=0 (Global), SG=1 (PerPri), and SG=2 (PriRanges) are fully implemented with per-group hash chains routed by PRI value.
 
 3. **X.509 path validation (§4.2.6):** Implemented via `validate_certificate()` in `syslog-sign`, using `rustls-webpki` for RFC 5280 chain validation. Callers should use `Verifier::from_validated_certificate()` to enforce trust anchors.
 

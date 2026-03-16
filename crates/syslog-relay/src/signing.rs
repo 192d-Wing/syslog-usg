@@ -84,9 +84,10 @@ impl SigningStage {
 
         // Serialize for signing (strips ssign/ssign-cert)
         let wire_bytes = serialize_for_signing(msg);
+        let pri = msg.pri().value();
 
-        // Feed to signer
-        if let Some(sig_block) = self.signer.add_message(&wire_bytes)? {
+        // Feed to signer with PRI for SG mode routing
+        if let Some(sig_block) = self.signer.add_message(&wire_bytes, Some(pri))? {
             let sig_msg = build_signature_message(&sig_block, &self.template)?;
             debug!(
                 gbc = sig_block.gbc,
@@ -115,7 +116,8 @@ impl SigningStage {
     pub fn flush(&mut self) -> Result<Vec<SyslogMessage>, SignError> {
         let mut result = Vec::new();
 
-        if let Some(sig_block) = self.signer.flush()? {
+        let sig_blocks = self.signer.flush()?;
+        for sig_block in sig_blocks {
             let sig_msg = build_signature_message(&sig_block, &self.template)?;
             debug!(
                 gbc = sig_block.gbc,

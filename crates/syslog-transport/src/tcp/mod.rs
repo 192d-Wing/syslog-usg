@@ -16,7 +16,7 @@ use tokio_stream::StreamExt;
 use tokio_util::codec::FramedRead;
 use tracing::{debug, error, info, warn};
 
-use crate::framing::OctetCountingCodec;
+use crate::framing::{LfDelimitedCodec, OctetCountingCodec, SyslogCodec};
 
 /// Maximum number of unique source IPs tracked for per-IP connection limiting.
 /// Prevents unbounded HashMap growth from connections with diverse source IPs.
@@ -55,6 +55,12 @@ pub struct TcpListenerConfig {
     /// Idle timeout — functionally equivalent to `read_timeout` for
     /// frame-oriented protocols but expressed as a separate knob for clarity.
     pub idle_timeout: Option<Duration>,
+    /// Optional set of allowed source IPs. If non-empty, connections from other IPs are rejected.
+    /// RFC 5426 §3.5 MAY: source IP filtering.
+    pub allowed_sources: std::collections::HashSet<std::net::IpAddr>,
+    /// When true, use LF-delimited (non-transparent) framing (RFC 6587 §3.4.2)
+    /// instead of octet-counting.
+    pub use_lf_framing: bool,
 }
 
 impl Default for TcpListenerConfig {
@@ -67,6 +73,8 @@ impl Default for TcpListenerConfig {
             max_connections_per_ip: None,
             read_timeout: None,
             idle_timeout: None,
+            allowed_sources: std::collections::HashSet::new(),
+            use_lf_framing: false,
         }
     }
 }
@@ -127,6 +135,13 @@ pub async fn run_tcp_listener(
             result = listener.accept() => {
                 match result {
                     Ok((stream, peer)) => {
+                        // RFC 5426 §3.5 MAY: source IP filtering
+                        if !config.allowed_sources.is_empty() && !config.allowed_sources.contains(&peer.ip()) {
+                            debug!(peer = %peer, "rejecting connection from non-allowed source IP");
+                            drop(stream);
+                            continue;
+                        }
+
                         // F-02: enforce connection limit
                         let permit = if let Some(ref sem) = semaphore {
                             match Arc::clone(sem).try_acquire_owned() {
@@ -191,6 +206,7 @@ pub async fn run_tcp_listener(
 
                         let tx = tx.clone();
                         let tls_acceptor = tls_acceptor.clone();
+                        let use_lf = config.use_lf_framing;
 
                         tokio::spawn(async move {
                             // Keep the permit and per-IP guard alive for the
@@ -200,14 +216,14 @@ pub async fn run_tcp_listener(
                             if let Some(acceptor) = tls_acceptor {
                                 match acceptor.accept(stream).await {
                                     Ok(tls_stream) => {
-                                        handle_tls_connection(tls_stream, peer, max_frame_size, tx, effective_timeout).await;
+                                        handle_tls_connection(tls_stream, peer, max_frame_size, tx, effective_timeout, use_lf).await;
                                     }
                                     Err(e) => {
                                         warn!(peer = %peer, "TLS handshake failed: {e}");
                                     }
                                 }
                             } else {
-                                handle_tcp_connection(stream, peer, max_frame_size, tx, effective_timeout).await;
+                                handle_tcp_connection(stream, peer, max_frame_size, tx, effective_timeout, use_lf).await;
                             }
                         });
                     }
@@ -231,9 +247,14 @@ async fn handle_tcp_connection(
     max_frame_size: usize,
     tx: mpsc::Sender<TcpMessage>,
     read_timeout: Option<Duration>,
+    use_lf_framing: bool,
 ) {
     debug!(peer = %peer, "TCP connection accepted");
-    let codec = OctetCountingCodec::with_max_frame_size(max_frame_size);
+    let codec = if use_lf_framing {
+        SyslogCodec::LfDelimited(LfDelimitedCodec::with_max_frame_size(max_frame_size))
+    } else {
+        SyslogCodec::OctetCounting(OctetCountingCodec::with_max_frame_size(max_frame_size))
+    };
     let mut framed = FramedRead::new(stream, codec);
 
     loop {
@@ -287,9 +308,14 @@ async fn handle_tls_connection(
     max_frame_size: usize,
     tx: mpsc::Sender<TcpMessage>,
     read_timeout: Option<Duration>,
+    use_lf_framing: bool,
 ) {
     debug!(peer = %peer, "TLS connection accepted");
-    let codec = OctetCountingCodec::with_max_frame_size(max_frame_size);
+    let codec = if use_lf_framing {
+        SyslogCodec::LfDelimited(LfDelimitedCodec::with_max_frame_size(max_frame_size))
+    } else {
+        SyslogCodec::OctetCounting(OctetCountingCodec::with_max_frame_size(max_frame_size))
+    };
     let mut framed = FramedRead::new(stream, codec);
 
     loop {
@@ -391,6 +417,8 @@ mod tests {
             max_connections_per_ip,
             read_timeout,
             idle_timeout: None,
+            allowed_sources: std::collections::HashSet::new(),
+            use_lf_framing: false,
         };
 
         let (tx, rx) = mpsc::channel::<TcpMessage>(64);

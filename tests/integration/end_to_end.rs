@@ -133,6 +133,8 @@ async fn tcp_end_to_end() {
         max_connections_per_ip: None,
         read_timeout: None,
         idle_timeout: None,
+        allowed_sources: std::collections::HashSet::new(),
+        use_lf_framing: false,
     };
 
     let (tcp_tx, mut tcp_rx) = mpsc::channel::<TcpMessage>(64);
@@ -226,6 +228,8 @@ async fn tcp_multiple_messages() {
         max_connections_per_ip: None,
         read_timeout: None,
         idle_timeout: None,
+        allowed_sources: std::collections::HashSet::new(),
+        use_lf_framing: false,
     };
 
     let (tcp_tx, mut tcp_rx) = mpsc::channel::<TcpMessage>(64);

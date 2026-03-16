@@ -26,7 +26,7 @@
 //!
 //! // Sign messages
 //! let msg_bytes = b"<165>1 2023-10-11T22:14:15.003Z host app - - - msg";
-//! if let Some(sig_block) = signer.add_message(msg_bytes)? {
+//! if let Some(sig_block) = signer.add_message(msg_bytes, None)? {
 //!     // Emit signature block
 //! }
 //!
@@ -53,6 +53,6 @@ pub use blocks::{CertificateBlock, SignatureBlock};
 pub use certificate::{build_root_store, mozilla_root_store, validate_certificate};
 pub use error::SignError;
 pub use signature::{SigningKey, VerifyingKey};
-pub use signer::{Signer, SignerConfig};
+pub use signer::{PriRange, Signer, SignerConfig};
 pub use types::{HashAlgorithm, KeyBlobType, SignatureGroup, SignatureScheme, Ver};
 pub use verifier::{ReplayDetector, Verifier};

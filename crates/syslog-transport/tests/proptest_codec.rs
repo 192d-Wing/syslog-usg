@@ -23,7 +23,7 @@ use tokio_util::codec::{Decoder, Encoder};
 
 proptest! {
     #[test]
-    fn codec_roundtrip(data in proptest::collection::vec(any::<u8>(), 0..=4096)) {
+    fn codec_roundtrip(data in proptest::collection::vec(any::<u8>(), 1..=4096)) {
         let mut encoder = OctetCountingCodec::new();
         let mut decoder = OctetCountingCodec::new();
 

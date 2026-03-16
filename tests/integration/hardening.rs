@@ -143,6 +143,8 @@ impl TcpTestHarness {
             max_connections_per_ip: None,
             read_timeout: Some(Duration::from_secs(5)),
             idle_timeout: Some(Duration::from_secs(10)),
+            allowed_sources: std::collections::HashSet::new(),
+            use_lf_framing: false,
         };
 
         let (tcp_tx, mut tcp_rx) = mpsc::channel::<TcpMessage>(256);

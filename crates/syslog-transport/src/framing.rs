@@ -1,7 +1,8 @@
-//! Octet-counting frame codec for TCP/TLS syslog transport.
+//! Syslog frame codecs for TCP/TLS transport.
 //!
-//! RFC 5425 §4.3: `SYSLOG-FRAME = MSG-LEN SP SYSLOG-MSG`
-//! where MSG-LEN is the number of octets in SYSLOG-MSG as ASCII decimal.
+//! Supports two framing modes defined in RFC 6587:
+//! - **Octet counting** (§3.4.1 / RFC 5425 §4.3): `MSG-LEN SP SYSLOG-MSG`
+//! - **Non-transparent / LF-delimited** (§3.4.2): messages terminated by LF (0x0A)
 
 use bytes::{Buf, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
@@ -155,6 +156,134 @@ impl Encoder<&[u8]> for OctetCountingCodec {
     }
 }
 
+// ---------------------------------------------------------------------------
+// LF-delimited codec (RFC 6587 §3.4.2)
+// ---------------------------------------------------------------------------
+
+/// LF-delimited codec for non-transparent framing (RFC 6587 §3.4.2).
+///
+/// Messages are terminated by LF (0x0A). CRLF sequences are also handled
+/// (the CR is stripped). This is the "non-transparent-framing" method
+/// described in RFC 6587.
+#[derive(Debug)]
+pub struct LfDelimitedCodec {
+    max_frame_size: usize,
+}
+
+impl LfDelimitedCodec {
+    /// Create a new codec with the default maximum frame size (64 KiB).
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            max_frame_size: MAX_FRAME_SIZE,
+        }
+    }
+
+    /// Create a new codec with a custom maximum frame size.
+    #[must_use]
+    pub fn with_max_frame_size(max_frame_size: usize) -> Self {
+        Self { max_frame_size }
+    }
+}
+
+impl Default for LfDelimitedCodec {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Decoder for LfDelimitedCodec {
+    type Item = BytesMut;
+    type Error = TransportError;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        // Search for LF (0x0A) in the buffer.
+        let lf_pos = match src.iter().position(|&b| b == b'\n') {
+            Some(pos) => pos,
+            None => {
+                // No LF found — check if the buffer exceeds the maximum frame size.
+                if src.len() > self.max_frame_size {
+                    return Err(TransportError::FrameTooLarge {
+                        size: src.len(),
+                        max: self.max_frame_size,
+                    });
+                }
+                return Ok(None); // Need more data.
+            }
+        };
+
+        // Split the buffer: frame bytes before LF, then consume the LF itself.
+        let mut frame = src.split_to(lf_pos);
+        // Advance past the LF byte.
+        src.advance(1);
+
+        // Strip trailing CR if present (handles CRLF line endings).
+        if frame.last() == Some(&b'\r') {
+            frame.truncate(frame.len().saturating_sub(1));
+        }
+
+        Ok(Some(frame))
+    }
+}
+
+impl Encoder<&[u8]> for LfDelimitedCodec {
+    type Error = TransportError;
+
+    fn encode(&mut self, item: &[u8], dst: &mut BytesMut) -> Result<(), Self::Error> {
+        if item.len() > self.max_frame_size {
+            return Err(TransportError::FrameTooLarge {
+                size: item.len(),
+                max: self.max_frame_size,
+            });
+        }
+
+        dst.reserve(item.len().saturating_add(1));
+        dst.extend_from_slice(item);
+        dst.extend_from_slice(b"\n");
+
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unified codec enum
+// ---------------------------------------------------------------------------
+
+/// Unified syslog frame codec supporting both framing modes.
+///
+/// This enum dispatches to either [`OctetCountingCodec`] or [`LfDelimitedCodec`],
+/// allowing TCP/TLS handlers to be generic over the framing mode.
+#[derive(Debug)]
+pub enum SyslogCodec {
+    /// RFC 5425 §4.3 / RFC 6587 §3.4.1: octet-counting framing.
+    OctetCounting(OctetCountingCodec),
+    /// RFC 6587 §3.4.2: LF-delimited (non-transparent) framing.
+    LfDelimited(LfDelimitedCodec),
+}
+
+impl Decoder for SyslogCodec {
+    type Item = BytesMut;
+    type Error = TransportError;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        match self {
+            Self::OctetCounting(c) => c.decode(src),
+            Self::LfDelimited(c) => c.decode(src),
+        }
+    }
+}
+
+impl Encoder<&[u8]> for SyslogCodec {
+    type Error = TransportError;
+
+    fn encode(&mut self, item: &[u8], dst: &mut BytesMut) -> Result<(), Self::Error> {
+        match self {
+            Self::OctetCounting(c) => c.encode(item, dst),
+            Self::LfDelimited(c) => c.encode(item, dst),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,6 +371,124 @@ mod tests {
         assert!(decoded.is_ok());
         if let Ok(Some(frame)) = decoded {
             assert_eq!(&frame[..], msg);
+        }
+    }
+
+    // -- LF-delimited codec tests -------------------------------------------
+
+    #[test]
+    fn lf_decode_single_frame() {
+        let mut codec = LfDelimitedCodec::new();
+        let mut buf = BytesMut::from(&b"hello world\n"[..]);
+        let result = codec.decode(&mut buf);
+        assert!(result.is_ok());
+        if let Ok(Some(frame)) = result {
+            assert_eq!(&frame[..], b"hello world");
+        }
+    }
+
+    #[test]
+    fn lf_decode_crlf() {
+        let mut codec = LfDelimitedCodec::new();
+        let mut buf = BytesMut::from(&b"hello\r\n"[..]);
+        let result = codec.decode(&mut buf);
+        assert!(result.is_ok());
+        if let Ok(Some(frame)) = result {
+            assert_eq!(&frame[..], b"hello");
+        }
+    }
+
+    #[test]
+    fn lf_decode_needs_more_data() {
+        let mut codec = LfDelimitedCodec::new();
+        let mut buf = BytesMut::from(&b"partial"[..]);
+        let result = codec.decode(&mut buf);
+        assert!(result.is_ok());
+        assert!(matches!(result, Ok(None)));
+    }
+
+    #[test]
+    fn lf_decode_frame_too_large() {
+        let mut codec = LfDelimitedCodec::with_max_frame_size(5);
+        let mut buf = BytesMut::from(&b"this is way too long without a newline"[..]);
+        let result = codec.decode(&mut buf);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn lf_encode_frame() {
+        let mut codec = LfDelimitedCodec::new();
+        let mut buf = BytesMut::new();
+        let result = codec.encode(b"hello", &mut buf);
+        assert!(result.is_ok());
+        assert_eq!(&buf[..], b"hello\n");
+    }
+
+    #[test]
+    fn lf_decode_multiple_frames() {
+        let mut codec = LfDelimitedCodec::new();
+        let mut buf = BytesMut::from(&b"first\nsecond\n"[..]);
+
+        let frame1 = codec.decode(&mut buf);
+        assert!(frame1.is_ok());
+        if let Ok(Some(f)) = frame1 {
+            assert_eq!(&f[..], b"first");
+        }
+
+        let frame2 = codec.decode(&mut buf);
+        assert!(frame2.is_ok());
+        if let Ok(Some(f)) = frame2 {
+            assert_eq!(&f[..], b"second");
+        }
+    }
+
+    #[test]
+    fn lf_decode_empty_line() {
+        let mut codec = LfDelimitedCodec::new();
+        let mut buf = BytesMut::from(&b"\n"[..]);
+        let result = codec.decode(&mut buf);
+        assert!(result.is_ok());
+        if let Ok(Some(frame)) = result {
+            assert!(frame.is_empty(), "empty line should produce empty frame");
+        }
+    }
+
+    #[test]
+    fn lf_roundtrip() {
+        let mut codec = LfDelimitedCodec::new();
+        let msg = b"<13>1 - - - - - - test message";
+        let mut encoded = BytesMut::new();
+        codec.encode(msg.as_slice(), &mut encoded).ok();
+
+        let mut decoder = LfDelimitedCodec::new();
+        let decoded = decoder.decode(&mut encoded);
+        assert!(decoded.is_ok());
+        if let Ok(Some(frame)) = decoded {
+            assert_eq!(&frame[..], msg);
+        }
+    }
+
+    // -- SyslogCodec enum tests ---------------------------------------------
+
+    #[test]
+    fn syslog_codec_octet_counting() {
+        let mut codec = SyslogCodec::OctetCounting(OctetCountingCodec::new());
+        let mut buf = BytesMut::from("5 hello");
+        let result = codec.decode(&mut buf);
+        assert!(result.is_ok());
+        if let Ok(Some(frame)) = result {
+            assert_eq!(&frame[..], b"hello");
+        }
+    }
+
+    #[test]
+    fn syslog_codec_lf_delimited() {
+        let mut codec = SyslogCodec::LfDelimited(LfDelimitedCodec::new());
+        let mut buf = BytesMut::from(&b"hello\n"[..]);
+        let result = codec.decode(&mut buf);
+        assert!(result.is_ok());
+        if let Ok(Some(frame)) = result {
+            assert_eq!(&frame[..], b"hello");
         }
     }
 }

@@ -32,6 +32,9 @@ pub struct UdpListenerConfig {
     pub recv_buf_size: usize,
     /// Maximum datagrams per source IP per rate-limit window (0 = unlimited).
     pub max_per_source: u32,
+    /// Optional set of allowed source IPs. If non-empty, datagrams from other IPs are dropped.
+    /// RFC 5426 §3.5 MAY: source IP filtering.
+    pub allowed_sources: std::collections::HashSet<std::net::IpAddr>,
 }
 
 impl Default for UdpListenerConfig {
@@ -41,6 +44,7 @@ impl Default for UdpListenerConfig {
             max_message_size: 65535,
             recv_buf_size: 0,
             max_per_source: 0,
+            allowed_sources: std::collections::HashSet::new(),
         }
     }
 }
@@ -135,6 +139,12 @@ pub async fn run_udp_listener(
             result = socket.recv_from(&mut buf) => {
                 match result {
                     Ok((len, source)) => {
+                        // RFC 5426 §3.5 MAY: source IP filtering
+                        if !config.allowed_sources.is_empty() && !config.allowed_sources.contains(&source.ip()) {
+                            debug!(source = %source, "dropping datagram from non-allowed source IP");
+                            continue;
+                        }
+
                         // Per-source rate limiting
                         if rate_limit > 0 {
                             let count = source_counts.entry(source.ip()).or_insert(0);
