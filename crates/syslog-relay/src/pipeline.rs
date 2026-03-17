@@ -177,15 +177,65 @@ impl<O: Output> Pipeline<O> {
         self.signing_fail_open = fail_open;
     }
 
-    /// Send a message to all outputs (fan-out mode).
+    /// Send a single message to all outputs (fan-out mode).
     ///
     /// Uses `try_send` to avoid head-of-line blocking: each output has its
     /// own bounded channel with a dedicated send task, so a slow output
     /// cannot stall delivery to other outputs.
-    fn send_to_all_outputs(&self, messages: &[SyslogMessage]) {
-        for out_msg in messages {
-            for tx in &self.output_txs {
-                if let Err(mpsc::error::TrySendError::Full(_)) = tx.try_send(out_msg.clone()) {
+    ///
+    /// Clones to N-1 outputs and moves the original to the last output
+    /// to save one clone per message.
+    fn fanout_single_to_all(&self, message: SyslogMessage) {
+        let count = self.output_txs.len();
+        if count == 0 {
+            return;
+        }
+        // Clone to all but the last output
+        for tx in self.output_txs.get(..count - 1).unwrap_or(&[]) {
+            if let Err(mpsc::error::TrySendError::Full(_)) = tx.try_send(message.clone()) {
+                metrics::counter!("relay_output_drops_total").increment(1);
+                warn!("per-output channel full, dropping message");
+            }
+        }
+        // Move to the last output (no clone)
+        if let Some(tx) = self.output_txs.last() {
+            if let Err(mpsc::error::TrySendError::Full(_)) = tx.try_send(message) {
+                metrics::counter!("relay_output_drops_total").increment(1);
+                warn!("per-output channel full, dropping message");
+            }
+        }
+    }
+
+    /// Send a batch of messages to all outputs (fan-out mode).
+    fn send_to_all_outputs(&self, messages: Vec<SyslogMessage>) {
+        for msg in messages {
+            self.fanout_single_to_all(msg);
+        }
+    }
+
+    /// Send a single message to selected outputs based on the routing table.
+    ///
+    /// Clones to N-1 matched outputs and moves to the last one.
+    fn fanout_single_to_routed(&self, message: SyslogMessage, output_indices: &[usize]) {
+        let count = output_indices.len();
+        if count == 0 {
+            return;
+        }
+        // Clone to all but the last matched output
+        if let Some(prefix) = output_indices.get(..count - 1) {
+            for &idx in prefix {
+                if let Some(tx) = self.output_txs.get(idx) {
+                    if let Err(mpsc::error::TrySendError::Full(_)) = tx.try_send(message.clone()) {
+                        metrics::counter!("relay_output_drops_total").increment(1);
+                        warn!("per-output channel full, dropping message");
+                    }
+                }
+            }
+        }
+        // Move to the last matched output (no clone)
+        if let Some(&last_output_idx) = output_indices.last() {
+            if let Some(tx) = self.output_txs.get(last_output_idx) {
+                if let Err(mpsc::error::TrySendError::Full(_)) = tx.try_send(message) {
                     metrics::counter!("relay_output_drops_total").increment(1);
                     warn!("per-output channel full, dropping message");
                 }
@@ -193,17 +243,10 @@ impl<O: Output> Pipeline<O> {
         }
     }
 
-    /// Send a message to selected outputs based on the routing table.
-    fn send_to_routed_outputs(&self, messages: &[SyslogMessage], output_indices: &[usize]) {
-        for out_msg in messages {
-            for &idx in output_indices {
-                if let Some(tx) = self.output_txs.get(idx) {
-                    if let Err(mpsc::error::TrySendError::Full(_)) = tx.try_send(out_msg.clone()) {
-                        metrics::counter!("relay_output_drops_total").increment(1);
-                        warn!("per-output channel full, dropping message");
-                    }
-                }
-            }
+    /// Send a batch of messages to selected outputs based on the routing table.
+    fn send_to_routed_outputs(&self, messages: Vec<SyslogMessage>, output_indices: &[usize]) {
+        for msg in messages {
+            self.fanout_single_to_routed(msg, output_indices);
         }
     }
 
@@ -351,8 +394,12 @@ impl<O: Output> Pipeline<O> {
                             metrics::counter!("relay_messages_processed_total").increment(1);
 
                             // Step 3: Signing (if configured) — produces original + sig/cert messages
-                            let messages_to_send = if let Some(ref mut signing) = self.signing {
-                                match signing.process_message(&message) {
+                            // Step 4: Route to outputs
+                            //
+                            // When signing is not configured (common case), we avoid allocating
+                            // a Vec and directly fan out the single message.
+                            if let Some(ref mut signing) = self.signing {
+                                let messages_to_send = match signing.process_message(&message) {
                                     Ok(msgs) => msgs,
                                     Err(e) => {
                                         metrics::counter!("relay_signing_failures_total").increment(1);
@@ -368,36 +415,51 @@ impl<O: Output> Pipeline<O> {
                                             continue;
                                         }
                                     }
-                                }
-                            } else {
-                                vec![message]
-                            };
+                                };
 
-                            // Step 4: Route to outputs
-                            if let Some(ref routing_table) = self.routing_table {
-                                let indices = routing_table.matching_output_indices(
-                                    // Use the first message (original) for routing decisions
-                                    match messages_to_send.first() {
-                                        Some(m) => m,
-                                        None => continue,
-                                    },
-                                );
-                                if indices.is_empty() {
-                                    if let Some(ref state) = self.shared_state {
-                                        state.counters().increment_dropped();
+                                if let Some(ref routing_table) = self.routing_table {
+                                    let indices = routing_table.matching_output_indices(
+                                        match messages_to_send.first() {
+                                            Some(m) => m,
+                                            None => continue,
+                                        },
+                                    );
+                                    if indices.is_empty() {
+                                        if let Some(ref state) = self.shared_state {
+                                            state.counters().increment_dropped();
+                                        }
+                                    } else {
+                                        if let Some(ref state) = self.shared_state {
+                                            state.counters().increment_forwarded();
+                                        }
+                                        self.send_to_routed_outputs(messages_to_send, &indices);
                                     }
                                 } else {
                                     if let Some(ref state) = self.shared_state {
                                         state.counters().increment_forwarded();
                                     }
-                                    self.send_to_routed_outputs(&messages_to_send, &indices);
+                                    self.send_to_all_outputs(messages_to_send);
                                 }
                             } else {
-                                // Fan out to all outputs
-                                if let Some(ref state) = self.shared_state {
-                                    state.counters().increment_forwarded();
+                                // No signing — avoid Vec allocation, fan out single message directly
+                                if let Some(ref routing_table) = self.routing_table {
+                                    let indices = routing_table.matching_output_indices(&message);
+                                    if indices.is_empty() {
+                                        if let Some(ref state) = self.shared_state {
+                                            state.counters().increment_dropped();
+                                        }
+                                    } else {
+                                        if let Some(ref state) = self.shared_state {
+                                            state.counters().increment_forwarded();
+                                        }
+                                        self.fanout_single_to_routed(message, &indices);
+                                    }
+                                } else {
+                                    if let Some(ref state) = self.shared_state {
+                                        state.counters().increment_forwarded();
+                                    }
+                                    self.fanout_single_to_all(message);
                                 }
-                                self.send_to_all_outputs(&messages_to_send);
                             }
                         }
                         None => {

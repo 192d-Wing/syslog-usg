@@ -129,6 +129,7 @@ fn bench_file_output(c: &mut Criterion) {
                 for i in 0..batch_size {
                     let _ = output.send(make_message(i)).await;
                 }
+                let _ = output.flush().await;
 
                 let _ = std::fs::remove_file(&path);
             });

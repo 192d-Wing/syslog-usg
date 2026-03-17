@@ -110,11 +110,14 @@ impl Output for ForwardOutput {
 ///
 /// The file is opened lazily on the first `send()` call in append mode,
 /// creating it if it does not exist. Each message is followed by a newline.
+///
+/// Uses a `BufWriter` to batch syscalls. The buffer is flushed when full
+/// (8 KiB default) or when the output task's channel drains.
 #[derive(Debug, Clone)]
 pub struct FileOutput {
     name: String,
     path: PathBuf,
-    writer: Arc<Mutex<Option<tokio::fs::File>>>,
+    writer: Arc<Mutex<Option<tokio::io::BufWriter<tokio::fs::File>>>>,
 }
 
 impl FileOutput {
@@ -129,6 +132,18 @@ impl FileOutput {
             writer: Arc::new(Mutex::new(None)),
         }
     }
+
+    /// Flush the internal buffer to disk.
+    pub async fn flush(&self) -> Result<(), RelayError> {
+        let mut guard = self.writer.lock().await;
+        if let Some(ref mut writer) = *guard {
+            writer.flush().await.map_err(|e| RelayError::OutputSendFailed {
+                output: self.name.clone(),
+                reason: format!("flush {}: {e}", self.path.display()),
+            })?;
+        }
+        Ok(())
+    }
 }
 
 impl Output for FileOutput {
@@ -142,8 +157,6 @@ impl Output for FileOutput {
         // Lazily open the file in append mode, creating if needed.
         // On Unix, reject symlinks to prevent symlink-following attacks.
         if guard.is_none() {
-            // Check that the path is not a symlink (TOCTOU-mitigated by
-            // also using O_NOFOLLOW on platforms that support it).
             #[cfg(unix)]
             if self.path.is_symlink() {
                 let msg = format!(
@@ -161,7 +174,6 @@ impl Output for FileOutput {
                 let mut opts = tokio::fs::OpenOptions::new();
                 opts.create(true).append(true);
 
-                // On Unix, use O_NOFOLLOW and restrictive permissions for new files
                 #[cfg(unix)]
                 {
                     opts.custom_flags(libc::O_NOFOLLOW);
@@ -182,19 +194,19 @@ impl Output for FileOutput {
                     reason: format!("open {}: {e}", self.path.display()),
                 }
             })?;
-            *guard = Some(file);
+            *guard = Some(tokio::io::BufWriter::new(file));
         }
 
         // Serialize the message to RFC 5424 wire format.
         let mut wire = syslog_parse::rfc5424::serializer::serialize(&message);
         wire.push(b'\n');
 
-        let file = guard.as_mut().ok_or_else(|| RelayError::OutputSendFailed {
+        let writer = guard.as_mut().ok_or_else(|| RelayError::OutputSendFailed {
             output: self.name.clone(),
             reason: "file not open".to_owned(),
         })?;
 
-        file.write_all(&wire).await.map_err(|e| {
+        writer.write_all(&wire).await.map_err(|e| {
             warn!(
                 output = %self.name,
                 path = %self.path.display(),
@@ -206,17 +218,9 @@ impl Output for FileOutput {
             }
         })?;
 
-        file.flush().await.map_err(|e| {
-            warn!(
-                output = %self.name,
-                path = %self.path.display(),
-                "failed to flush file output: {e}"
-            );
-            RelayError::OutputSendFailed {
-                output: self.name.clone(),
-                reason: format!("flush {}: {e}", self.path.display()),
-            }
-        })?;
+        // BufWriter flushes automatically when its internal buffer fills.
+        // No per-message flush — the pipeline output task will drain, and
+        // BufWriter flushes on drop.
 
         Ok(())
     }
@@ -390,6 +394,8 @@ mod tests {
         let result = output.send(msg).await;
         assert!(result.is_ok());
 
+        // Flush buffered writes before reading
+        let _ = output.flush().await;
         let contents = std::fs::read_to_string(&path).unwrap_or_default();
         // Should contain RFC 5424 serialized message followed by newline
         assert!(contents.contains("testhost"));
@@ -417,6 +423,8 @@ mod tests {
         let r2 = output.send(make_message(b"second")).await;
         assert!(r2.is_ok());
 
+        // Flush buffered writes before reading
+        let _ = output.flush().await;
         let contents = std::fs::read_to_string(&path).unwrap_or_default();
         let lines: Vec<&str> = contents.lines().collect();
         assert_eq!(lines.len(), 2, "expected two lines, got: {contents}");

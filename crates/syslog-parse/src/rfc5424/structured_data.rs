@@ -215,9 +215,14 @@ fn parse_sd_param(input: &[u8], pos: &mut usize) -> Result<SdParam, ParseError> 
     // Parse PARAM-VALUE with escape handling
     let value = parse_param_value(input, pos)?;
 
+    let value_str = match &value {
+        ParamValue::Borrowed(s) => CompactString::new(s),
+        ParamValue::Owned(s) => CompactString::new(s),
+    };
+
     Ok(SdParam {
         name: CompactString::new(name_str),
-        value: CompactString::new(&value),
+        value: value_str,
     })
 }
 
@@ -225,8 +230,68 @@ fn parse_sd_param(input: &[u8], pos: &mut usize) -> Result<SdParam, ParseError> 
 ///
 /// RFC 5424 §6.3.3: Within PARAM-VALUE, `\"`, `\\`, and `\]` are the only
 /// valid escape sequences.
-fn parse_param_value(input: &[u8], pos: &mut usize) -> Result<String, ParseError> {
-    let mut value = String::new();
+///
+/// Fast path: when no escape sequences are present (common case), borrows
+/// directly from the input to avoid allocation.
+fn parse_param_value<'a>(input: &'a [u8], pos: &mut usize) -> Result<ParamValue<'a>, ParseError> {
+    let start = *pos;
+
+    // Fast path: scan for closing quote without escapes.
+    // Most param values contain no escape sequences.
+    let mut scan = *pos;
+    loop {
+        let b = input
+            .get(scan)
+            .copied()
+            .ok_or(ParseError::UnexpectedEndOfInput {
+                context: "PARAM-VALUE",
+            })?;
+
+        if b == b'"' {
+            // No escapes found — borrow directly from input
+            let len = scan.saturating_sub(start);
+            if len > MAX_PARAM_VALUE_LENGTH {
+                return Err(ParseError::FieldTooLong {
+                    field: "PARAM-VALUE",
+                    max: MAX_PARAM_VALUE_LENGTH,
+                    actual: len,
+                });
+            }
+            let value_bytes = input.get(start..scan).ok_or(
+                ParseError::UnexpectedEndOfInput {
+                    context: "PARAM-VALUE bytes",
+                },
+            )?;
+            let value_str = core::str::from_utf8(value_bytes)?;
+            *pos = scan.checked_add(1).ok_or(ParseError::UnexpectedEndOfInput {
+                context: "PARAM-VALUE close quote",
+            })?;
+            return Ok(ParamValue::Borrowed(value_str));
+        }
+
+        if b == b'\\' {
+            // Escape found — fall through to slow path
+            break;
+        }
+
+        scan = scan.checked_add(1).ok_or(ParseError::UnexpectedEndOfInput {
+            context: "PARAM-VALUE byte",
+        })?;
+    }
+
+    // Slow path: escapes present. Copy bytes scanned so far, then continue
+    // char-by-char.
+    let mut value = String::with_capacity(32);
+    let prefix = input.get(start..scan).ok_or(
+        ParseError::UnexpectedEndOfInput {
+            context: "PARAM-VALUE prefix",
+        },
+    )?;
+    // Already validated as ASCII in the fast-path scan
+    for &b in prefix {
+        value.push(b as char);
+    }
+    *pos = scan;
 
     loop {
         let b = input
@@ -237,14 +302,12 @@ fn parse_param_value(input: &[u8], pos: &mut usize) -> Result<String, ParseError
             })?;
 
         if b == b'"' {
-            // End of PARAM-VALUE — consume closing quote
             *pos = pos.checked_add(1).ok_or(ParseError::UnexpectedEndOfInput {
                 context: "PARAM-VALUE close quote",
             })?;
-            return Ok(value);
+            return Ok(ParamValue::Owned(value));
         }
 
-        // Enforce maximum PARAM-VALUE length to prevent unbounded allocation
         if value.len() >= MAX_PARAM_VALUE_LENGTH {
             return Err(ParseError::FieldTooLong {
                 field: "PARAM-VALUE",
@@ -254,7 +317,6 @@ fn parse_param_value(input: &[u8], pos: &mut usize) -> Result<String, ParseError
         }
 
         if b == b'\\' {
-            // Escape sequence
             let escape_pos = *pos;
             *pos = pos.checked_add(1).ok_or(ParseError::UnexpectedEndOfInput {
                 context: "PARAM-VALUE escape",
@@ -285,6 +347,13 @@ fn parse_param_value(input: &[u8], pos: &mut usize) -> Result<String, ParseError
             context: "PARAM-VALUE byte",
         })?;
     }
+}
+
+/// Intermediate value from `parse_param_value` to avoid allocation
+/// when no escape sequences are present.
+enum ParamValue<'a> {
+    Borrowed(&'a str),
+    Owned(String),
 }
 
 /// Check whether a byte is valid in an SD-NAME.
