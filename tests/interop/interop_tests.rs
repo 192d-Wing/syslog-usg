@@ -77,11 +77,7 @@ fn build_image(name: &str, dockerfile_dir: &Path) -> bool {
 
 /// Run a sender container with a mounted config file.
 /// Returns the container ID on success.
-fn run_sender_container(
-    image: &str,
-    config_path: &Path,
-    mount_target: &str,
-) -> Option<String> {
+fn run_sender_container(image: &str, config_path: &Path, mount_target: &str) -> Option<String> {
     let output = Command::new("docker")
         .args([
             "run",
@@ -124,12 +120,7 @@ fn docker_exec_logger(container_id: &str, tag: &str, message: &str) -> bool {
 }
 
 /// Execute `logger` with a specific priority and structured data tag.
-fn docker_exec_logger_full(
-    container_id: &str,
-    tag: &str,
-    priority: &str,
-    message: &str,
-) -> bool {
+fn docker_exec_logger_full(container_id: &str, tag: &str, priority: &str, message: &str) -> bool {
     let status = Command::new("docker")
         .args([
             "exec",
@@ -155,7 +146,6 @@ fn stop_container(container_id: &str) {
         .stderr(Stdio::null())
         .status();
 }
-
 
 /// Write a config template to a temp file, substituting __TARGET_HOST__ and __TARGET_PORT__.
 fn render_config(template_path: &Path, host: &str, port: u16) -> tempfile::NamedTempFile {
@@ -206,9 +196,7 @@ impl UdpInteropHarness {
         });
 
         // Bind directly — no probe-drop-rebind. This socket stays open.
-        let socket = std::sync::Arc::new(
-            UdpSocket::bind("0.0.0.0:0").await.expect("bind UDP"),
-        );
+        let socket = std::sync::Arc::new(UdpSocket::bind("0.0.0.0:0").await.expect("bind UDP"));
         let listen_addr = socket.local_addr().expect("local_addr");
 
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
@@ -506,27 +494,37 @@ async fn rsyslog_rfc5424_over_udp() {
         port,
     );
 
-    let container_id = run_sender_container(
-        RSYSLOG_IMAGE,
-        config.path(),
-        "/etc/rsyslog.conf",
-    )
-    .expect("start rsyslog container");
-    let _guard = ContainerGuard { id: container_id.clone() };
+    let container_id = run_sender_container(RSYSLOG_IMAGE, config.path(), "/etc/rsyslog.conf")
+        .expect("start rsyslog container");
+    let _guard = ContainerGuard {
+        id: container_id.clone(),
+    };
 
     // Let rsyslog start (it sends startup messages we don't care about)
     tokio::time::sleep(Duration::from_millis(SENDER_SETTLE_MS)).await;
     let baseline = harness.message_count().await;
 
     // Inject test messages via logger
-    assert!(docker_exec_logger(&container_id, "interop-test", "rsyslog UDP RFC5424 test message"));
+    assert!(docker_exec_logger(
+        &container_id,
+        "interop-test",
+        "rsyslog UDP RFC5424 test message"
+    ));
     assert!(docker_exec_logger_full(
-        &container_id, "auth-test", "auth.warning", "authentication warning from rsyslog"
+        &container_id,
+        "auth-test",
+        "auth.warning",
+        "authentication warning from rsyslog"
     ));
 
     // Wait for 2 NEW messages beyond the startup baseline
     let received = wait_for_messages(&harness.output, baseline + 2, 5000).await;
-    assert!(received, "expected at least {} messages, got {}", baseline + 2, harness.message_count().await);
+    assert!(
+        received,
+        "expected at least {} messages, got {}",
+        baseline + 2,
+        harness.message_count().await
+    );
 
     let msgs = harness.collected().await;
 
@@ -536,7 +534,10 @@ async fn rsyslog_rfc5424_over_udp() {
             String::from_utf8_lossy(b).contains("rsyslog UDP RFC5424 test message")
         })
     });
-    assert!(test_msg.is_some(), "test message not found in collected messages");
+    assert!(
+        test_msg.is_some(),
+        "test message not found in collected messages"
+    );
     let msg = test_msg.unwrap();
 
     // rsyslog sends RFC 5424 version 1
@@ -544,7 +545,11 @@ async fn rsyslog_rfc5424_over_udp() {
     // Facility local0 = 16
     assert_eq!(msg.facility, Facility::Local0, "expected local0 facility");
     // Severity info = 6
-    assert_eq!(msg.severity, Severity::Informational, "expected info severity");
+    assert_eq!(
+        msg.severity,
+        Severity::Informational,
+        "expected info severity"
+    );
     // Hostname should be set
     assert!(msg.hostname.is_some(), "hostname should be present");
     // App-name should match the logger tag
@@ -563,7 +568,11 @@ async fn rsyslog_rfc5424_over_udp() {
     assert!(auth_msg.is_some(), "auth warning message not found");
     let auth = auth_msg.unwrap();
     assert_eq!(auth.facility, Facility::Auth, "expected auth facility");
-    assert_eq!(auth.severity, Severity::Warning, "expected warning severity");
+    assert_eq!(
+        auth.severity,
+        Severity::Warning,
+        "expected warning severity"
+    );
     assert_eq!(auth.app_name.as_deref(), Some("auth-test"));
 
     harness.shutdown();
@@ -584,24 +593,39 @@ async fn rsyslog_rfc5424_over_tcp() {
         port,
     );
 
-    let container_id = run_sender_container(
-        RSYSLOG_IMAGE,
-        config.path(),
-        "/etc/rsyslog.conf",
-    )
-    .expect("start rsyslog container");
-    let _guard = ContainerGuard { id: container_id.clone() };
+    let container_id = run_sender_container(RSYSLOG_IMAGE, config.path(), "/etc/rsyslog.conf")
+        .expect("start rsyslog container");
+    let _guard = ContainerGuard {
+        id: container_id.clone(),
+    };
 
     tokio::time::sleep(Duration::from_millis(SENDER_SETTLE_MS)).await;
     let baseline = harness.message_count().await;
 
     // Send messages
-    assert!(docker_exec_logger(&container_id, "tcp-test", "rsyslog TCP octet-counted message 1"));
-    assert!(docker_exec_logger(&container_id, "tcp-test", "rsyslog TCP octet-counted message 2"));
-    assert!(docker_exec_logger(&container_id, "tcp-test", "rsyslog TCP octet-counted message 3"));
+    assert!(docker_exec_logger(
+        &container_id,
+        "tcp-test",
+        "rsyslog TCP octet-counted message 1"
+    ));
+    assert!(docker_exec_logger(
+        &container_id,
+        "tcp-test",
+        "rsyslog TCP octet-counted message 2"
+    ));
+    assert!(docker_exec_logger(
+        &container_id,
+        "tcp-test",
+        "rsyslog TCP octet-counted message 3"
+    ));
 
     let received = wait_for_messages(&harness.output, baseline + 3, 5000).await;
-    assert!(received, "expected at least {} messages, got {}", baseline + 3, harness.message_count().await);
+    assert!(
+        received,
+        "expected at least {} messages, got {}",
+        baseline + 3,
+        harness.message_count().await
+    );
 
     let msgs = harness.collected().await;
 
@@ -616,14 +640,20 @@ async fn rsyslog_rfc5424_over_tcp() {
     }
 
     // Verify ordering — messages from a single TCP stream should be in order
-    let tcp_msgs: Vec<_> = msgs.iter()
+    let tcp_msgs: Vec<_> = msgs
+        .iter()
         .filter(|m| m.app_name.as_deref() == Some("tcp-test"))
         .collect();
     assert!(tcp_msgs.len() >= 3, "expected at least 3 tcp-test messages");
 
     // Check message bodies are in order
-    let bodies: Vec<String> = tcp_msgs.iter()
-        .filter_map(|m| m.msg.as_ref().map(|b| String::from_utf8_lossy(b).to_string()))
+    let bodies: Vec<String> = tcp_msgs
+        .iter()
+        .filter_map(|m| {
+            m.msg
+                .as_ref()
+                .map(|b| String::from_utf8_lossy(b).to_string())
+        })
         .collect();
     for (i, body) in bodies.iter().enumerate() {
         assert!(
@@ -650,33 +680,43 @@ async fn rsyslog_rfc3164_over_tcp() {
         port,
     );
 
-    let container_id = run_sender_container(
-        RSYSLOG_IMAGE,
-        config.path(),
-        "/etc/rsyslog.conf",
-    )
-    .expect("start rsyslog container");
-    let _guard = ContainerGuard { id: container_id.clone() };
+    let container_id = run_sender_container(RSYSLOG_IMAGE, config.path(), "/etc/rsyslog.conf")
+        .expect("start rsyslog container");
+    let _guard = ContainerGuard {
+        id: container_id.clone(),
+    };
 
     tokio::time::sleep(Duration::from_millis(SENDER_SETTLE_MS)).await;
     let baseline = harness.message_count().await;
 
-    assert!(docker_exec_logger(&container_id, "legacy-test", "rsyslog RFC3164 legacy message"));
+    assert!(docker_exec_logger(
+        &container_id,
+        "legacy-test",
+        "rsyslog RFC3164 legacy message"
+    ));
 
     let received = wait_for_messages(&harness.output, baseline + 1, 5000).await;
-    assert!(received, "expected at least {} messages, got {}", baseline + 1, harness.message_count().await);
+    assert!(
+        received,
+        "expected at least {} messages, got {}",
+        baseline + 1,
+        harness.message_count().await
+    );
 
     let msgs = harness.collected().await;
     let legacy_msg = msgs.iter().find(|m| {
-        m.msg.as_ref().is_some_and(|b| {
-            String::from_utf8_lossy(b).contains("rsyslog RFC3164 legacy message")
-        })
+        m.msg
+            .as_ref()
+            .is_some_and(|b| String::from_utf8_lossy(b).contains("rsyslog RFC3164 legacy message"))
     });
     assert!(legacy_msg.is_some(), "legacy message not found");
 
     // RFC 3164 messages parsed via auto-detect should still have basic fields
     let msg = legacy_msg.unwrap();
-    assert!(msg.hostname.is_some(), "hostname should be extracted from 3164 header");
+    assert!(
+        msg.hostname.is_some(),
+        "hostname should be extracted from 3164 header"
+    );
     // The parser may set version to 0 for 3164 messages
     // Facility and severity should still be correct
     assert_eq!(msg.facility, Facility::Local0);
@@ -699,13 +739,11 @@ async fn rsyslog_burst_traffic() {
         port,
     );
 
-    let container_id = run_sender_container(
-        RSYSLOG_IMAGE,
-        config.path(),
-        "/etc/rsyslog.conf",
-    )
-    .expect("start rsyslog container");
-    let _guard = ContainerGuard { id: container_id.clone() };
+    let container_id = run_sender_container(RSYSLOG_IMAGE, config.path(), "/etc/rsyslog.conf")
+        .expect("start rsyslog container");
+    let _guard = ContainerGuard {
+        id: container_id.clone(),
+    };
 
     tokio::time::sleep(Duration::from_millis(SENDER_SETTLE_MS)).await;
     let baseline = harness.message_count().await;
@@ -723,11 +761,16 @@ async fn rsyslog_burst_traffic() {
     // Wait for all messages — UDP may lose some, so we accept a threshold
     let received = wait_for_messages(&harness.output, baseline + msg_count / 2, 10000).await;
     let actual = harness.message_count().await;
-    assert!(received, "expected at least {} messages, got {actual}", baseline + msg_count / 2);
+    assert!(
+        received,
+        "expected at least {} messages, got {actual}",
+        baseline + msg_count / 2
+    );
 
     // Verify the ones we did get are well-formed
     let msgs = harness.collected().await;
-    let burst_msgs: Vec<_> = msgs.iter()
+    let burst_msgs: Vec<_> = msgs
+        .iter()
         .filter(|m| m.app_name.as_deref() == Some("burst-test"))
         .collect();
 
@@ -762,33 +805,45 @@ async fn rsyslog_large_message() {
         port,
     );
 
-    let container_id = run_sender_container(
-        RSYSLOG_IMAGE,
-        config.path(),
-        "/etc/rsyslog.conf",
-    )
-    .expect("start rsyslog container");
-    let _guard = ContainerGuard { id: container_id.clone() };
+    let container_id = run_sender_container(RSYSLOG_IMAGE, config.path(), "/etc/rsyslog.conf")
+        .expect("start rsyslog container");
+    let _guard = ContainerGuard {
+        id: container_id.clone(),
+    };
 
     tokio::time::sleep(Duration::from_millis(SENDER_SETTLE_MS)).await;
     let baseline = harness.message_count().await;
 
     // Send a large message (close to UDP max for typical syslog ~4KB payload)
     let large_payload = "X".repeat(4000);
-    assert!(docker_exec_logger(&container_id, "large-test", &large_payload));
+    assert!(docker_exec_logger(
+        &container_id,
+        "large-test",
+        &large_payload
+    ));
 
     let received = wait_for_messages(&harness.output, baseline + 1, 5000).await;
     assert!(received, "expected at least {} messages", baseline + 1);
 
     let msgs = harness.collected().await;
-    let large_msg = msgs.iter().find(|m| m.app_name.as_deref() == Some("large-test"));
+    let large_msg = msgs
+        .iter()
+        .find(|m| m.app_name.as_deref() == Some("large-test"));
     assert!(large_msg.is_some(), "large message not found");
 
     let msg = large_msg.unwrap();
-    let body = msg.msg.as_ref().map(|b| String::from_utf8_lossy(b).to_string()).unwrap_or_default();
+    let body = msg
+        .msg
+        .as_ref()
+        .map(|b| String::from_utf8_lossy(b).to_string())
+        .unwrap_or_default();
     // The message should contain a substantial portion of our payload
     // (rsyslog may have a max message size limit, but 4KB should be within range)
-    assert!(body.len() > 500, "large message body too short: {} bytes", body.len());
+    assert!(
+        body.len() > 500,
+        "large message body too short: {} bytes",
+        body.len()
+    );
 
     harness.shutdown();
 }
@@ -807,24 +862,42 @@ async fn rsyslog_multiple_facilities_and_severities() {
         port,
     );
 
-    let container_id = run_sender_container(
-        RSYSLOG_IMAGE,
-        config.path(),
-        "/etc/rsyslog.conf",
-    )
-    .expect("start rsyslog container");
-    let _guard = ContainerGuard { id: container_id.clone() };
+    let container_id = run_sender_container(RSYSLOG_IMAGE, config.path(), "/etc/rsyslog.conf")
+        .expect("start rsyslog container");
+    let _guard = ContainerGuard {
+        id: container_id.clone(),
+    };
 
     tokio::time::sleep(Duration::from_millis(SENDER_SETTLE_MS)).await;
     let baseline = harness.message_count().await;
 
     // Send messages with different facility.severity combinations
     let cases = [
-        ("kern.emerg", "kern-test", Facility::Kern, Severity::Emergency),
+        (
+            "kern.emerg",
+            "kern-test",
+            Facility::Kern,
+            Severity::Emergency,
+        ),
         ("user.err", "user-test", Facility::User, Severity::Error),
-        ("mail.warning", "mail-test", Facility::Mail, Severity::Warning),
-        ("daemon.notice", "daemon-test", Facility::Daemon, Severity::Notice),
-        ("local7.debug", "local7-test", Facility::Local7, Severity::Debug),
+        (
+            "mail.warning",
+            "mail-test",
+            Facility::Mail,
+            Severity::Warning,
+        ),
+        (
+            "daemon.notice",
+            "daemon-test",
+            Facility::Daemon,
+            Severity::Notice,
+        ),
+        (
+            "local7.debug",
+            "local7-test",
+            Facility::Local7,
+            Severity::Debug,
+        ),
     ];
 
     for (priority, tag, _, _) in &cases {
@@ -837,7 +910,12 @@ async fn rsyslog_multiple_facilities_and_severities() {
     }
 
     let received = wait_for_messages(&harness.output, baseline + cases.len(), 5000).await;
-    assert!(received, "expected {} messages, got {}", baseline + cases.len(), harness.message_count().await);
+    assert!(
+        received,
+        "expected {} messages, got {}",
+        baseline + cases.len(),
+        harness.message_count().await
+    );
 
     let msgs = harness.collected().await;
 
@@ -845,8 +923,14 @@ async fn rsyslog_multiple_facilities_and_severities() {
         let found = msgs.iter().find(|m| m.app_name.as_deref() == Some(*tag));
         assert!(found.is_some(), "message with tag '{tag}' not found");
         let msg = found.unwrap();
-        assert_eq!(msg.facility, *expected_facility, "facility mismatch for tag '{tag}'");
-        assert_eq!(msg.severity, *expected_severity, "severity mismatch for tag '{tag}'");
+        assert_eq!(
+            msg.facility, *expected_facility,
+            "facility mismatch for tag '{tag}'"
+        );
+        assert_eq!(
+            msg.severity, *expected_severity,
+            "severity mismatch for tag '{tag}'"
+        );
     }
 
     harness.shutdown();
@@ -867,32 +951,42 @@ async fn rsyslog_tcp_reconnect_behavior() {
         port,
     );
 
-    let container_id = run_sender_container(
-        RSYSLOG_IMAGE,
-        config.path(),
-        "/etc/rsyslog.conf",
-    )
-    .expect("start rsyslog container");
-    let _guard = ContainerGuard { id: container_id.clone() };
+    let container_id = run_sender_container(RSYSLOG_IMAGE, config.path(), "/etc/rsyslog.conf")
+        .expect("start rsyslog container");
+    let _guard = ContainerGuard {
+        id: container_id.clone(),
+    };
 
     tokio::time::sleep(Duration::from_millis(SENDER_SETTLE_MS)).await;
     let baseline = harness.message_count().await;
 
     // Send initial message
-    assert!(docker_exec_logger(&container_id, "reconnect-test", "before restart"));
+    assert!(docker_exec_logger(
+        &container_id,
+        "reconnect-test",
+        "before restart"
+    ));
     let received = wait_for_messages(&harness.output, baseline + 1, 5000).await;
     assert!(received, "expected message before restart");
 
     // Send more messages — rsyslog should have an established connection
-    assert!(docker_exec_logger(&container_id, "reconnect-test", "after initial"));
+    assert!(docker_exec_logger(
+        &container_id,
+        "reconnect-test",
+        "after initial"
+    ));
     let received = wait_for_messages(&harness.output, baseline + 2, 5000).await;
     assert!(received, "expected messages after initial send");
 
     let msgs = harness.collected().await;
-    let reconnect_msgs: Vec<_> = msgs.iter()
+    let reconnect_msgs: Vec<_> = msgs
+        .iter()
         .filter(|m| m.app_name.as_deref() == Some("reconnect-test"))
         .collect();
-    assert!(reconnect_msgs.len() >= 2, "expected at least 2 reconnect-test messages");
+    assert!(
+        reconnect_msgs.len() >= 2,
+        "expected at least 2 reconnect-test messages"
+    );
 
     harness.shutdown();
 }
@@ -921,25 +1015,39 @@ async fn syslog_ng_rfc5424_over_udp() {
         "/etc/syslog-ng/syslog-ng.conf",
     )
     .expect("start syslog-ng container");
-    let _guard = ContainerGuard { id: container_id.clone() };
+    let _guard = ContainerGuard {
+        id: container_id.clone(),
+    };
 
     tokio::time::sleep(Duration::from_millis(SENDER_SETTLE_MS)).await;
     let baseline = harness.message_count().await;
 
-    assert!(docker_exec_logger(&container_id, "sng-udp-test", "syslog-ng UDP RFC5424 message"));
+    assert!(docker_exec_logger(
+        &container_id,
+        "sng-udp-test",
+        "syslog-ng UDP RFC5424 message"
+    ));
     assert!(docker_exec_logger_full(
-        &container_id, "sng-auth", "auth.crit", "critical auth event from syslog-ng"
+        &container_id,
+        "sng-auth",
+        "auth.crit",
+        "critical auth event from syslog-ng"
     ));
 
     let received = wait_for_messages(&harness.output, baseline + 2, 5000).await;
-    assert!(received, "expected at least {} messages, got {}", baseline + 2, harness.message_count().await);
+    assert!(
+        received,
+        "expected at least {} messages, got {}",
+        baseline + 2,
+        harness.message_count().await
+    );
 
     let msgs = harness.collected().await;
 
     let test_msg = msgs.iter().find(|m| {
-        m.msg.as_ref().is_some_and(|b| {
-            String::from_utf8_lossy(b).contains("syslog-ng UDP RFC5424 message")
-        })
+        m.msg
+            .as_ref()
+            .is_some_and(|b| String::from_utf8_lossy(b).contains("syslog-ng UDP RFC5424 message"))
     });
     assert!(test_msg.is_some(), "syslog-ng test message not found");
     let msg = test_msg.unwrap();
@@ -985,27 +1093,55 @@ async fn syslog_ng_rfc5424_over_tcp() {
         "/etc/syslog-ng/syslog-ng.conf",
     )
     .expect("start syslog-ng container");
-    let _guard = ContainerGuard { id: container_id.clone() };
+    let _guard = ContainerGuard {
+        id: container_id.clone(),
+    };
 
     tokio::time::sleep(Duration::from_millis(SENDER_SETTLE_MS)).await;
     let baseline = harness.message_count().await;
 
-    assert!(docker_exec_logger(&container_id, "sng-tcp-test", "syslog-ng TCP message 1"));
-    assert!(docker_exec_logger(&container_id, "sng-tcp-test", "syslog-ng TCP message 2"));
-    assert!(docker_exec_logger(&container_id, "sng-tcp-test", "syslog-ng TCP message 3"));
+    assert!(docker_exec_logger(
+        &container_id,
+        "sng-tcp-test",
+        "syslog-ng TCP message 1"
+    ));
+    assert!(docker_exec_logger(
+        &container_id,
+        "sng-tcp-test",
+        "syslog-ng TCP message 2"
+    ));
+    assert!(docker_exec_logger(
+        &container_id,
+        "sng-tcp-test",
+        "syslog-ng TCP message 3"
+    ));
 
     let received = wait_for_messages(&harness.output, baseline + 3, 5000).await;
-    assert!(received, "expected at least {} messages, got {}", baseline + 3, harness.message_count().await);
+    assert!(
+        received,
+        "expected at least {} messages, got {}",
+        baseline + 3,
+        harness.message_count().await
+    );
 
     let msgs = harness.collected().await;
-    let sng_msgs: Vec<_> = msgs.iter()
+    let sng_msgs: Vec<_> = msgs
+        .iter()
         .filter(|m| m.app_name.as_deref() == Some("sng-tcp-test"))
         .collect();
-    assert!(sng_msgs.len() >= 3, "expected at least 3 syslog-ng TCP messages");
+    assert!(
+        sng_msgs.len() >= 3,
+        "expected at least 3 syslog-ng TCP messages"
+    );
 
     // Verify message ordering over TCP
-    let bodies: Vec<String> = sng_msgs.iter()
-        .filter_map(|m| m.msg.as_ref().map(|b| String::from_utf8_lossy(b).to_string()))
+    let bodies: Vec<String> = sng_msgs
+        .iter()
+        .filter_map(|m| {
+            m.msg
+                .as_ref()
+                .map(|b| String::from_utf8_lossy(b).to_string())
+        })
         .collect();
     for (i, body) in bodies.iter().enumerate() {
         assert!(
@@ -1043,28 +1179,42 @@ async fn syslog_ng_rfc3164_over_tcp() {
         "/etc/syslog-ng/syslog-ng.conf",
     )
     .expect("start syslog-ng container");
-    let _guard = ContainerGuard { id: container_id.clone() };
+    let _guard = ContainerGuard {
+        id: container_id.clone(),
+    };
 
     tokio::time::sleep(Duration::from_millis(SENDER_SETTLE_MS)).await;
     let baseline = harness.message_count().await;
 
-    assert!(docker_exec_logger(&container_id, "sng-legacy", "syslog-ng legacy format test"));
+    assert!(docker_exec_logger(
+        &container_id,
+        "sng-legacy",
+        "syslog-ng legacy format test"
+    ));
 
     let received = wait_for_messages(&harness.output, baseline + 1, 5000).await;
-    assert!(received, "expected at least {} messages, got {}", baseline + 1, harness.message_count().await);
+    assert!(
+        received,
+        "expected at least {} messages, got {}",
+        baseline + 1,
+        harness.message_count().await
+    );
 
     let msgs = harness.collected().await;
     let legacy_msg = msgs.iter().find(|m| {
-        m.msg.as_ref().is_some_and(|b| {
-            String::from_utf8_lossy(b).contains("syslog-ng legacy format test")
-        })
+        m.msg
+            .as_ref()
+            .is_some_and(|b| String::from_utf8_lossy(b).contains("syslog-ng legacy format test"))
     });
     assert!(legacy_msg.is_some(), "syslog-ng legacy message not found");
 
     let msg = legacy_msg.unwrap();
     assert_eq!(msg.facility, Facility::Local0);
     assert_eq!(msg.severity, Severity::Informational);
-    assert!(msg.hostname.is_some(), "hostname should be parsed from 3164 header");
+    assert!(
+        msg.hostname.is_some(),
+        "hostname should be parsed from 3164 header"
+    );
 
     harness.shutdown();
 }
@@ -1089,7 +1239,9 @@ async fn syslog_ng_burst_traffic() {
         "/etc/syslog-ng/syslog-ng.conf",
     )
     .expect("start syslog-ng container");
-    let _guard = ContainerGuard { id: container_id.clone() };
+    let _guard = ContainerGuard {
+        id: container_id.clone(),
+    };
 
     tokio::time::sleep(Duration::from_millis(SENDER_SETTLE_MS)).await;
     let baseline = harness.message_count().await;
@@ -1105,10 +1257,15 @@ async fn syslog_ng_burst_traffic() {
 
     let received = wait_for_messages(&harness.output, baseline + msg_count / 2, 10000).await;
     let actual = harness.message_count().await;
-    assert!(received, "expected at least {} messages, got {actual}", baseline + msg_count / 2);
+    assert!(
+        received,
+        "expected at least {} messages, got {actual}",
+        baseline + msg_count / 2
+    );
 
     let msgs = harness.collected().await;
-    let burst_msgs: Vec<_> = msgs.iter()
+    let burst_msgs: Vec<_> = msgs
+        .iter()
         .filter(|m| m.app_name.as_deref() == Some("sng-burst"))
         .collect();
 
@@ -1147,23 +1304,39 @@ async fn syslog_ng_large_message() {
         "/etc/syslog-ng/syslog-ng.conf",
     )
     .expect("start syslog-ng container");
-    let _guard = ContainerGuard { id: container_id.clone() };
+    let _guard = ContainerGuard {
+        id: container_id.clone(),
+    };
 
     tokio::time::sleep(Duration::from_millis(SENDER_SETTLE_MS)).await;
     let baseline = harness.message_count().await;
 
     let large_payload = "Y".repeat(4000);
-    assert!(docker_exec_logger(&container_id, "sng-large", &large_payload));
+    assert!(docker_exec_logger(
+        &container_id,
+        "sng-large",
+        &large_payload
+    ));
 
     let received = wait_for_messages(&harness.output, baseline + 1, 5000).await;
     assert!(received, "expected at least {} messages", baseline + 1);
 
     let msgs = harness.collected().await;
-    let large_msg = msgs.iter().find(|m| m.app_name.as_deref() == Some("sng-large"));
+    let large_msg = msgs
+        .iter()
+        .find(|m| m.app_name.as_deref() == Some("sng-large"));
     assert!(large_msg.is_some(), "syslog-ng large message not found");
 
-    let body_len = large_msg.unwrap().msg.as_ref().map(|b| b.len()).unwrap_or(0);
-    assert!(body_len > 500, "syslog-ng large message too short: {body_len} bytes");
+    let body_len = large_msg
+        .unwrap()
+        .msg
+        .as_ref()
+        .map(|b| b.len())
+        .unwrap_or(0);
+    assert!(
+        body_len > 500,
+        "syslog-ng large message too short: {body_len} bytes"
+    );
 
     harness.shutdown();
 }
@@ -1194,13 +1367,12 @@ async fn parallel_rsyslog_and_syslog_ng_udp() {
         port,
     );
 
-    let rsyslog_id = run_sender_container(
-        RSYSLOG_IMAGE,
-        rsyslog_config.path(),
-        "/etc/rsyslog.conf",
-    )
-    .expect("start rsyslog container");
-    let _rsyslog_guard = ContainerGuard { id: rsyslog_id.clone() };
+    let rsyslog_id =
+        run_sender_container(RSYSLOG_IMAGE, rsyslog_config.path(), "/etc/rsyslog.conf")
+            .expect("start rsyslog container");
+    let _rsyslog_guard = ContainerGuard {
+        id: rsyslog_id.clone(),
+    };
 
     let syslog_ng_id = run_sender_container(
         SYSLOG_NG_IMAGE,
@@ -1208,25 +1380,43 @@ async fn parallel_rsyslog_and_syslog_ng_udp() {
         "/etc/syslog-ng/syslog-ng.conf",
     )
     .expect("start syslog-ng container");
-    let _syslog_ng_guard = ContainerGuard { id: syslog_ng_id.clone() };
+    let _syslog_ng_guard = ContainerGuard {
+        id: syslog_ng_id.clone(),
+    };
 
     tokio::time::sleep(Duration::from_millis(SENDER_SETTLE_MS)).await;
     let baseline = harness.message_count().await;
 
     // Send messages from both senders
-    assert!(docker_exec_logger(&rsyslog_id, "rsyslog-parallel", "from rsyslog"));
-    assert!(docker_exec_logger(&syslog_ng_id, "syslog-ng-parallel", "from syslog-ng"));
+    assert!(docker_exec_logger(
+        &rsyslog_id,
+        "rsyslog-parallel",
+        "from rsyslog"
+    ));
+    assert!(docker_exec_logger(
+        &syslog_ng_id,
+        "syslog-ng-parallel",
+        "from syslog-ng"
+    ));
 
     let received = wait_for_messages(&harness.output, baseline + 2, 8000).await;
-    assert!(received, "expected at least {} messages from parallel senders", baseline + 2);
+    assert!(
+        received,
+        "expected at least {} messages from parallel senders",
+        baseline + 2
+    );
 
     let msgs = harness.collected().await;
 
     let from_rsyslog = msgs.iter().any(|m| {
-        m.msg.as_ref().is_some_and(|b| String::from_utf8_lossy(b).contains("from rsyslog"))
+        m.msg
+            .as_ref()
+            .is_some_and(|b| String::from_utf8_lossy(b).contains("from rsyslog"))
     });
     let from_syslog_ng = msgs.iter().any(|m| {
-        m.msg.as_ref().is_some_and(|b| String::from_utf8_lossy(b).contains("from syslog-ng"))
+        m.msg
+            .as_ref()
+            .is_some_and(|b| String::from_utf8_lossy(b).contains("from syslog-ng"))
     });
 
     assert!(from_rsyslog, "message from rsyslog not found");
@@ -1267,13 +1457,12 @@ async fn parallel_rsyslog_and_syslog_ng_tcp() {
         port,
     );
 
-    let rsyslog_id = run_sender_container(
-        RSYSLOG_IMAGE,
-        rsyslog_config.path(),
-        "/etc/rsyslog.conf",
-    )
-    .expect("start rsyslog container");
-    let _rsyslog_guard = ContainerGuard { id: rsyslog_id.clone() };
+    let rsyslog_id =
+        run_sender_container(RSYSLOG_IMAGE, rsyslog_config.path(), "/etc/rsyslog.conf")
+            .expect("start rsyslog container");
+    let _rsyslog_guard = ContainerGuard {
+        id: rsyslog_id.clone(),
+    };
 
     let syslog_ng_id = run_sender_container(
         SYSLOG_NG_IMAGE,
@@ -1281,26 +1470,53 @@ async fn parallel_rsyslog_and_syslog_ng_tcp() {
         "/etc/syslog-ng/syslog-ng.conf",
     )
     .expect("start syslog-ng container");
-    let _syslog_ng_guard = ContainerGuard { id: syslog_ng_id.clone() };
+    let _syslog_ng_guard = ContainerGuard {
+        id: syslog_ng_id.clone(),
+    };
 
     tokio::time::sleep(Duration::from_millis(SENDER_SETTLE_MS)).await;
     let baseline = harness.message_count().await;
 
     // Send from both over TCP (both should use octet-counting)
     for i in 0..3 {
-        assert!(docker_exec_logger(&rsyslog_id, "rs-tcp-par", &format!("rsyslog tcp parallel {i}")));
-        assert!(docker_exec_logger(&syslog_ng_id, "sng-tcp-par", &format!("syslog-ng tcp parallel {i}")));
+        assert!(docker_exec_logger(
+            &rsyslog_id,
+            "rs-tcp-par",
+            &format!("rsyslog tcp parallel {i}")
+        ));
+        assert!(docker_exec_logger(
+            &syslog_ng_id,
+            "sng-tcp-par",
+            &format!("syslog-ng tcp parallel {i}")
+        ));
     }
 
     let received = wait_for_messages(&harness.output, baseline + 6, 8000).await;
-    assert!(received, "expected at least {} messages from parallel TCP senders, got {}", baseline + 6, harness.message_count().await);
+    assert!(
+        received,
+        "expected at least {} messages from parallel TCP senders, got {}",
+        baseline + 6,
+        harness.message_count().await
+    );
 
     let msgs = harness.collected().await;
-    let rs_count = msgs.iter().filter(|m| m.app_name.as_deref() == Some("rs-tcp-par")).count();
-    let sng_count = msgs.iter().filter(|m| m.app_name.as_deref() == Some("sng-tcp-par")).count();
+    let rs_count = msgs
+        .iter()
+        .filter(|m| m.app_name.as_deref() == Some("rs-tcp-par"))
+        .count();
+    let sng_count = msgs
+        .iter()
+        .filter(|m| m.app_name.as_deref() == Some("sng-tcp-par"))
+        .count();
 
-    assert!(rs_count >= 3, "expected 3 rsyslog TCP parallel messages, got {rs_count}");
-    assert!(sng_count >= 3, "expected 3 syslog-ng TCP parallel messages, got {sng_count}");
+    assert!(
+        rs_count >= 3,
+        "expected 3 rsyslog TCP parallel messages, got {rs_count}"
+    );
+    assert!(
+        sng_count >= 3,
+        "expected 3 syslog-ng TCP parallel messages, got {sng_count}"
+    );
 
     harness.shutdown();
 }
@@ -1323,13 +1539,11 @@ async fn rsyslog_utf8_message() {
         port,
     );
 
-    let container_id = run_sender_container(
-        RSYSLOG_IMAGE,
-        config.path(),
-        "/etc/rsyslog.conf",
-    )
-    .expect("start rsyslog container");
-    let _guard = ContainerGuard { id: container_id.clone() };
+    let container_id = run_sender_container(RSYSLOG_IMAGE, config.path(), "/etc/rsyslog.conf")
+        .expect("start rsyslog container");
+    let _guard = ContainerGuard {
+        id: container_id.clone(),
+    };
 
     tokio::time::sleep(Duration::from_millis(SENDER_SETTLE_MS)).await;
     let baseline = harness.message_count().await;
@@ -1342,10 +1556,15 @@ async fn rsyslog_utf8_message() {
     assert!(received, "expected at least {} messages", baseline + 1);
 
     let msgs = harness.collected().await;
-    let utf8_found = msgs.iter().find(|m| m.app_name.as_deref() == Some("utf8-test"));
+    let utf8_found = msgs
+        .iter()
+        .find(|m| m.app_name.as_deref() == Some("utf8-test"));
     assert!(utf8_found.is_some(), "UTF-8 message not found");
 
-    let body = utf8_found.unwrap().msg.as_ref()
+    let body = utf8_found
+        .unwrap()
+        .msg
+        .as_ref()
         .map(|b| String::from_utf8_lossy(b).to_string())
         .unwrap_or_default();
 
@@ -1377,7 +1596,9 @@ async fn syslog_ng_utf8_message() {
         "/etc/syslog-ng/syslog-ng.conf",
     )
     .expect("start syslog-ng container");
-    let _guard = ContainerGuard { id: container_id.clone() };
+    let _guard = ContainerGuard {
+        id: container_id.clone(),
+    };
 
     tokio::time::sleep(Duration::from_millis(SENDER_SETTLE_MS)).await;
     let baseline = harness.message_count().await;
@@ -1389,10 +1610,15 @@ async fn syslog_ng_utf8_message() {
     assert!(received, "expected at least {} messages", baseline + 1);
 
     let msgs = harness.collected().await;
-    let utf8_found = msgs.iter().find(|m| m.app_name.as_deref() == Some("sng-utf8"));
+    let utf8_found = msgs
+        .iter()
+        .find(|m| m.app_name.as_deref() == Some("sng-utf8"));
     assert!(utf8_found.is_some(), "syslog-ng UTF-8 message not found");
 
-    let body = utf8_found.unwrap().msg.as_ref()
+    let body = utf8_found
+        .unwrap()
+        .msg
+        .as_ref()
         .map(|b| String::from_utf8_lossy(b).to_string())
         .unwrap_or_default();
 
@@ -1420,24 +1646,28 @@ async fn rsyslog_timestamp_precision() {
         port,
     );
 
-    let container_id = run_sender_container(
-        RSYSLOG_IMAGE,
-        config.path(),
-        "/etc/rsyslog.conf",
-    )
-    .expect("start rsyslog container");
-    let _guard = ContainerGuard { id: container_id.clone() };
+    let container_id = run_sender_container(RSYSLOG_IMAGE, config.path(), "/etc/rsyslog.conf")
+        .expect("start rsyslog container");
+    let _guard = ContainerGuard {
+        id: container_id.clone(),
+    };
 
     tokio::time::sleep(Duration::from_millis(SENDER_SETTLE_MS)).await;
     let baseline = harness.message_count().await;
 
-    assert!(docker_exec_logger(&container_id, "ts-test", "timestamp precision test"));
+    assert!(docker_exec_logger(
+        &container_id,
+        "ts-test",
+        "timestamp precision test"
+    ));
 
     let received = wait_for_messages(&harness.output, baseline + 1, 5000).await;
     assert!(received, "expected at least {} messages", baseline + 1);
 
     let msgs = harness.collected().await;
-    let ts_msg = msgs.iter().find(|m| m.app_name.as_deref() == Some("ts-test"));
+    let ts_msg = msgs
+        .iter()
+        .find(|m| m.app_name.as_deref() == Some("ts-test"));
     assert!(ts_msg.is_some());
 
     let msg = ts_msg.unwrap();
@@ -1452,14 +1682,14 @@ async fn rsyslog_timestamp_precision() {
                 "invalid month: {}",
                 dt.month()
             );
-            assert!(
-                (1..=31).contains(&dt.day()),
-                "invalid day: {}",
-                dt.day()
-            );
+            assert!((1..=31).contains(&dt.day()), "invalid day: {}", dt.day());
             assert!(dt.hour() <= 23, "invalid hour: {}", dt.hour());
             assert!(dt.minute() <= 59, "invalid minute: {}", dt.minute());
-            assert!(dt.second() <= 60, "invalid second (allowing leap): {}", dt.second());
+            assert!(
+                dt.second() <= 60,
+                "invalid second (allowing leap): {}",
+                dt.second()
+            );
         }
         SyslogTimestamp::Nil => {
             panic!("expected RFC 3339 timestamp, got Nil");
@@ -1487,28 +1717,24 @@ async fn rsyslog_various_app_names() {
         port,
     );
 
-    let container_id = run_sender_container(
-        RSYSLOG_IMAGE,
-        config.path(),
-        "/etc/rsyslog.conf",
-    )
-    .expect("start rsyslog container");
-    let _guard = ContainerGuard { id: container_id.clone() };
+    let container_id = run_sender_container(RSYSLOG_IMAGE, config.path(), "/etc/rsyslog.conf")
+        .expect("start rsyslog container");
+    let _guard = ContainerGuard {
+        id: container_id.clone(),
+    };
 
     tokio::time::sleep(Duration::from_millis(SENDER_SETTLE_MS)).await;
     let baseline = harness.message_count().await;
 
     // Test various app-name patterns that real systems produce
-    let tags = [
-        "sshd",
-        "CRON",
-        "systemd-resolved",
-        "kernel",
-        "my.app.v2",
-    ];
+    let tags = ["sshd", "CRON", "systemd-resolved", "kernel", "my.app.v2"];
 
     for tag in &tags {
-        assert!(docker_exec_logger(&container_id, tag, &format!("app-name test for {tag}")));
+        assert!(docker_exec_logger(
+            &container_id,
+            tag,
+            &format!("app-name test for {tag}")
+        ));
     }
 
     let received = wait_for_messages(&harness.output, baseline + tags.len(), 5000).await;
