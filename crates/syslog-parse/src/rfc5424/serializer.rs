@@ -83,9 +83,18 @@ pub fn serialize(msg: &SyslogMessage) -> Vec<u8> {
     }
 
     // [SP MSG]
+    // Sanitize control characters (CR, LF, NUL) in the MSG body to prevent
+    // log injection when using LF-delimited framing or file outputs.
+    // RFC 5424 §6.4 allows UTF-8 content including newlines, but forwarding
+    // unsanitized newlines enables log smuggling attacks.
     if let Some(ref body) = msg.msg {
         buf.push(b' ');
-        buf.extend_from_slice(body);
+        for &b in body.iter() {
+            match b {
+                b'\n' | b'\r' | 0 => buf.push(b' '),
+                _ => buf.push(b),
+            }
+        }
     }
 
     buf

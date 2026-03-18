@@ -53,6 +53,15 @@ pub trait Output: Send + Sync + fmt::Debug {
         &self,
         message: SyslogMessage,
     ) -> impl std::future::Future<Output = Result<(), RelayError>> + Send;
+
+    /// Flush any buffered data to the underlying sink.
+    ///
+    /// The default implementation is a no-op. Outputs that buffer data
+    /// (e.g. `FileOutput` with `BufWriter`) should override this to
+    /// ensure data is persisted before the output is dropped.
+    fn flush(&self) -> impl std::future::Future<Output = Result<(), RelayError>> + Send {
+        async { Ok(()) }
+    }
 }
 
 /// A simple output that collects messages into a `Vec` for testing.
@@ -160,7 +169,6 @@ impl Output for FileOutput {
         // Lazily open the file in append mode, creating if needed.
         // On Unix, reject symlinks to prevent symlink-following attacks.
         if guard.is_none() {
-            #[cfg(unix)]
             if self.path.is_symlink() {
                 let msg = format!(
                     "refusing to open symlink at {} — potential symlink attack",
@@ -221,11 +229,11 @@ impl Output for FileOutput {
             }
         })?;
 
-        // BufWriter flushes automatically when its internal buffer fills.
-        // No per-message flush — the pipeline output task will drain, and
-        // BufWriter flushes on drop.
-
         Ok(())
+    }
+
+    async fn flush(&self) -> Result<(), RelayError> {
+        FileOutput::flush(self).await
     }
 }
 

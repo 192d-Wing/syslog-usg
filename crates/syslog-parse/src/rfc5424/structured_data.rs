@@ -25,7 +25,7 @@ const MAX_PARAM_VALUE_LENGTH: usize = 8192;
 pub fn parse_structured_data(input: &[u8], pos: &mut usize) -> Result<StructuredData, ParseError> {
     // Check for NILVALUE
     if input.get(*pos).copied() == Some(b'-') {
-        let next = input.get(pos.wrapping_add(1)).copied();
+        let next = pos.checked_add(1).and_then(|i| input.get(i)).copied();
         if next == Some(b' ') || next.is_none() {
             *pos = pos.checked_add(1).ok_or(ParseError::UnexpectedEndOfInput {
                 context: "STRUCTURED-DATA",
@@ -285,7 +285,8 @@ fn parse_param_value<'a>(input: &'a [u8], pos: &mut usize) -> Result<ParamValue<
 
     // Slow path: escapes present. Copy bytes scanned so far, then continue
     // char-by-char.
-    let mut value = String::with_capacity(32);
+    let estimated_len = scan.saturating_sub(start).saturating_add(64);
+    let mut value = String::with_capacity(estimated_len.min(MAX_PARAM_VALUE_LENGTH));
     let prefix = input
         .get(start..scan)
         .ok_or(ParseError::UnexpectedEndOfInput {

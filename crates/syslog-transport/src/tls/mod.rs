@@ -29,6 +29,10 @@ pub struct TlsConfig {
     pub client_ca_path: Option<String>,
     /// Optional paths to PEM-encoded CRL files for client certificate revocation checking.
     pub crl_paths: Vec<String>,
+    /// When true, accept client certificates whose revocation status cannot be
+    /// determined (e.g. the issuing CA is not covered by loaded CRLs).
+    /// Default: false — unknown revocation status is rejected, failing closed.
+    pub allow_unknown_revocation_status: bool,
 }
 
 /// Build a `rustls::ServerConfig` from the provided TLS configuration.
@@ -95,13 +99,19 @@ pub fn build_server_config(config: &TlsConfig) -> Result<Arc<ServerConfig>, Tran
 
         let mut verifier_builder = WebPkiClientVerifier::builder(Arc::new(root_store));
         if !crls.is_empty() {
-            verifier_builder = verifier_builder
-                .with_crls(crls)
-                .allow_unknown_revocation_status();
-            info!(
-                "CRL revocation checking enabled ({} CRL file(s) loaded)",
-                config.crl_paths.len()
-            );
+            verifier_builder = verifier_builder.with_crls(crls);
+            if config.allow_unknown_revocation_status {
+                verifier_builder = verifier_builder.allow_unknown_revocation_status();
+                info!(
+                    "CRL revocation checking enabled ({} CRL file(s) loaded, unknown revocation status ALLOWED)",
+                    config.crl_paths.len()
+                );
+            } else {
+                info!(
+                    "CRL revocation checking enabled ({} CRL file(s) loaded, unknown revocation status REJECTED)",
+                    config.crl_paths.len()
+                );
+            }
         }
         let verifier = verifier_builder.build().map_err(|e| {
             TransportError::InvalidFrame(format!("failed to build client cert verifier: {e}"))
@@ -210,6 +220,7 @@ mod tests {
             client_auth: true,
             client_ca_path: None,
             crl_paths: vec![],
+            allow_unknown_revocation_status: false,
         };
         let result = build_server_config(&config);
         assert!(result.is_err());
@@ -230,6 +241,7 @@ mod tests {
             client_auth: true,
             client_ca_path: Some("/nonexistent/ca.pem".to_owned()),
             crl_paths: vec![],
+            allow_unknown_revocation_status: false,
         };
         let result = build_server_config(&config);
         assert!(result.is_err());
@@ -243,6 +255,7 @@ mod tests {
             client_auth: false,
             client_ca_path: None,
             crl_paths: vec![],
+            allow_unknown_revocation_status: false,
         };
         let result = build_server_config(&config);
         assert!(result.is_err());

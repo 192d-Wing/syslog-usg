@@ -448,6 +448,17 @@ impl<O: Output> Pipeline<O> {
                         );
                     }
                 }
+                // Flush buffered data before the output is dropped.
+                // tokio::io::BufWriter does NOT flush on Drop (async I/O
+                // cannot run in synchronous destructors), so an explicit
+                // flush is required to prevent data loss.
+                if let Err(e) = output.flush().await {
+                    warn!(
+                        output = output.name(),
+                        error = %e,
+                        "failed to flush output on shutdown"
+                    );
+                }
             }));
         }
 

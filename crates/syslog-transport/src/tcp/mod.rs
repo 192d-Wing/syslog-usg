@@ -29,7 +29,7 @@ const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Default read timeout applied when no explicit timeout is configured.
 /// Prevents half-open connections from holding resources indefinitely.
-const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(300);
+const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A framed syslog message received over TCP/TLS.
 #[derive(Debug, Clone)]

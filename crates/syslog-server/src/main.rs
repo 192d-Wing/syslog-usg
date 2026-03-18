@@ -63,6 +63,13 @@ impl Output for ServerOutput {
             Self::Console(o) => o.send(message).await,
         }
     }
+
+    async fn flush(&self) -> Result<(), RelayError> {
+        match self {
+            Self::File(o) => o.flush().await,
+            _ => Ok(()),
+        }
+    }
 }
 
 /// syslog-usg: Production-grade syslog server and relay.
@@ -248,6 +255,7 @@ async fn main() {
                 client_auth: tls_cfg.client_auth,
                 client_ca_path: tls_cfg.ca_path.clone(),
                 crl_paths: tls_cfg.crl_paths.clone(),
+                allow_unknown_revocation_status: false,
             };
             let tls_server_config = match syslog_transport::tls::build_server_config(&transport_tls)
             {
@@ -558,7 +566,7 @@ fn start_listeners(
                             }
                             Err(e) => {
                                 state.counters().increment_malformed();
-                                warn!(
+                                debug!(
                                     source = %datagram.source,
                                     "parse error: {}",
                                     sanitize_log_msg(&e.to_string())
@@ -613,7 +621,7 @@ fn start_listeners(
                             }
                             Err(e) => {
                                 state.counters().increment_malformed();
-                                warn!(
+                                debug!(
                                     source = %datagram.peer,
                                     "parse error: {}",
                                     sanitize_log_msg(&e.to_string())
@@ -651,6 +659,7 @@ fn start_listeners(
                         client_auth: tls_cfg.client_auth,
                         client_ca_path: tls_cfg.ca_path.clone(),
                         crl_paths: tls_cfg.crl_paths.clone(),
+                        allow_unknown_revocation_status: false,
                     };
 
                     match syslog_transport::tls::build_server_config(&transport_tls) {
@@ -712,7 +721,7 @@ fn start_listeners(
                             }
                             Err(e) => {
                                 state.counters().increment_malformed();
-                                warn!(
+                                debug!(
                                     source = %frame.peer,
                                     tls = frame.tls,
                                     "parse error: {}",
@@ -1364,7 +1373,31 @@ fn reload_config(
         }
     }
 
-    // Detect changes that require a restart
+    // Detect changes that require a restart.
+    // Security-critical changes (signing, verification) reject the reload
+    // entirely to prevent silent security posture changes.
+    let mut security_critical_changed = false;
+
+    if new_config.signing != current_config.signing {
+        error!("signing configuration changed — restart required, rejecting reload");
+        security_critical_changed = true;
+    }
+    if new_config.verification != current_config.verification {
+        error!("verification configuration changed — restart required, rejecting reload");
+        security_critical_changed = true;
+    }
+
+    if security_critical_changed {
+        metrics::counter!("syslog_reload_errors_total", "reason" => "security_critical_change")
+            .increment(1);
+        error!(
+            "reload rejected: security-critical settings (signing/verification) \
+             cannot be changed at runtime — restart the server to apply"
+        );
+        return None;
+    }
+
+    // Non-security changes: warn but accept the reload (log level was already applied).
     if new_config.listeners != current_config.listeners {
         warn!("listener configuration changed — restart required to apply");
     }
@@ -1373,12 +1406,6 @@ fn reload_config(
     }
     if new_config.pipeline != current_config.pipeline {
         warn!("pipeline configuration changed — restart required to apply");
-    }
-    if new_config.signing != current_config.signing {
-        warn!("signing configuration changed — restart required to apply");
-    }
-    if new_config.verification != current_config.verification {
-        warn!("verification configuration changed — restart required to apply");
     }
     if new_config.metrics.bearer_token != current_config.metrics.bearer_token {
         warn!("metrics.bearer_token changed — restart required to apply");

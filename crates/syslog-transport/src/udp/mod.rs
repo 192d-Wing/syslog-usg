@@ -137,14 +137,19 @@ pub async fn run_udp_listener(
             );
             // Evict all entries with count <= 1 (likely spoofed single-packet sources).
             source_counts.retain(|_, count| *count > 1);
-            // If still over capacity, do a full reset as a last resort.
+            // If still over capacity, randomly evict half the remaining entries
+            // instead of a full clear to preserve rate-limit state for heavy
+            // senders while making room for new sources.
             if source_counts.len() >= MAX_TRACKED_SOURCES {
                 warn!(
                     remaining = source_counts.len(),
-                    "rate-limit table still full after eviction, performing full reset"
+                    "rate-limit table still full after eviction, randomly evicting half"
                 );
-                source_counts.clear();
-                window_start = std::time::Instant::now();
+                let mut keep = true;
+                source_counts.retain(|_, _| {
+                    keep = !keep;
+                    keep
+                });
             }
         }
 

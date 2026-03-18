@@ -45,7 +45,10 @@ pub fn parse_auto(input: &[u8]) -> Result<SyslogMessage, ParseError> {
     // RFC 5424 §6.2.2: VERSION = NONZERO-DIGIT
     // Check if byte after PRI is '1' followed by SP (RFC 5424 version 1)
     let is_5424 = matches!(
-        (input.get(after_pri), input.get(after_pri.wrapping_add(1))),
+        (
+            input.get(after_pri),
+            after_pri.checked_add(1).and_then(|i| input.get(i))
+        ),
         (Some(&b'1'), Some(&b' '))
     );
 

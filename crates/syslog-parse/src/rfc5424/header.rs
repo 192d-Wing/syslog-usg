@@ -161,7 +161,7 @@ pub fn parse_timestamp(input: &[u8], pos: &mut usize) -> Result<SyslogTimestamp,
     // Check for NILVALUE
     if input.get(*pos).copied() == Some(b'-') {
         // Peek: if next char is SP or end-of-input, this is NILVALUE
-        let next = input.get(pos.wrapping_add(1)).copied();
+        let next = pos.checked_add(1).and_then(|i| input.get(i)).copied();
         if next == Some(b' ') || next.is_none() {
             *pos = pos.checked_add(1).ok_or(ParseError::UnexpectedEndOfInput {
                 context: "TIMESTAMP",
@@ -208,7 +208,7 @@ pub fn parse_field(
 ) -> Result<Option<CompactString>, ParseError> {
     // Check for NILVALUE
     if input.get(*pos).copied() == Some(b'-') {
-        let next = input.get(pos.wrapping_add(1)).copied();
+        let next = pos.checked_add(1).and_then(|i| input.get(i)).copied();
         if next == Some(b' ') || next.is_none() {
             *pos = pos
                 .checked_add(1)

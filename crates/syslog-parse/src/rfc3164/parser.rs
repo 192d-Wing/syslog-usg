@@ -23,7 +23,8 @@ pub fn parse(input: &[u8]) -> Result<SyslogMessage, ParseError> {
 
     // Everything after PRI is the "content" — try to extract BSD fields
     let content = input.get(pos..).unwrap_or_default();
-    let content_str = core::str::from_utf8(content).unwrap_or_default();
+    let content_lossy = String::from_utf8_lossy(content);
+    let content_str: &str = &content_lossy;
 
     // Attempt to parse BSD timestamp: "Mmm dd HH:MM:SS "
     let (timestamp, rest) = parse_bsd_timestamp(content_str);
