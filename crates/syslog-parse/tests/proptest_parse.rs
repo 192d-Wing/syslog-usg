@@ -54,10 +54,9 @@ fn arb_sd_name_char() -> impl Strategy<Value = u8> {
 /// a valid enterprise ID (`name@PEN` with digits-only PEN).
 fn arb_sd_id() -> impl Strategy<Value = String> {
     // SD-NAME chars excluding '@' to avoid invalid enterprise IDs
-    let sd_name_no_at = (33u8..=126)
-        .prop_filter("SD-NAME excludes = ] \" SP @", |b| {
-            *b != b'=' && *b != b']' && *b != b'"' && *b != b' ' && *b != b'@'
-        });
+    let sd_name_no_at = (33u8..=126).prop_filter("SD-NAME excludes = ] \" SP @", |b| {
+        *b != b'=' && *b != b']' && *b != b'"' && *b != b' ' && *b != b'@'
+    });
 
     // Registered: 1-32 chars, no '@'
     let registered = proptest::collection::vec(sd_name_no_at, 1..=32)

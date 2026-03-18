@@ -125,14 +125,27 @@ pub async fn run_udp_listener(
             window_start = std::time::Instant::now();
         }
 
-        // Cap source tracking table to prevent OOM from spoofed source IPs
+        // Cap source tracking table to prevent OOM from spoofed source IPs.
+        // Instead of clearing the entire table (which defeats rate limiting),
+        // evict only the entries with the lowest counts — keeping entries for
+        // the heaviest senders so they remain rate-limited.
         if rate_limit > 0 && source_counts.len() >= MAX_TRACKED_SOURCES {
             warn!(
                 max = MAX_TRACKED_SOURCES,
-                "per-source rate-limit table full, resetting (possible spoofed-IP flood)"
+                "per-source rate-limit table full (possible spoofed-IP flood), \
+                 evicting low-count entries"
             );
-            source_counts.clear();
-            window_start = std::time::Instant::now();
+            // Evict all entries with count <= 1 (likely spoofed single-packet sources).
+            source_counts.retain(|_, count| *count > 1);
+            // If still over capacity, do a full reset as a last resort.
+            if source_counts.len() >= MAX_TRACKED_SOURCES {
+                warn!(
+                    remaining = source_counts.len(),
+                    "rate-limit table still full after eviction, performing full reset"
+                );
+                source_counts.clear();
+                window_start = std::time::Instant::now();
+            }
         }
 
         tokio::select! {
@@ -369,7 +382,10 @@ mod tests {
         let result = send_udp(&socket, target, &max_msg).await;
         // Should not be a FrameTooLarge error (may be an IO error from OS)
         assert!(
-            !matches!(result, Err(crate::error::TransportError::FrameTooLarge { .. })),
+            !matches!(
+                result,
+                Err(crate::error::TransportError::FrameTooLarge { .. })
+            ),
             "exactly 65527 bytes should pass size validation"
         );
     }

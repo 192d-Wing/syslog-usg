@@ -461,6 +461,14 @@ pub struct MetricsConfig {
     #[serde(default)]
     pub bearer_token: Option<String>,
 
+    /// Path to a file containing the bearer token.
+    /// Preferred over `bearer_token` for production deployments — avoids
+    /// exposing the token in environment variables or process arguments.
+    /// The file is read at startup and its contents (trimmed) used as the token.
+    /// If both `bearer_token` and `bearer_token_file` are set, the file takes precedence.
+    #[serde(default)]
+    pub bearer_token_file: Option<String>,
+
     /// Optional TLS configuration for the metrics/management HTTP server.
     /// When set, the endpoint serves HTTPS instead of HTTP, protecting
     /// the bearer token in transit.
@@ -490,6 +498,7 @@ impl Default for MetricsConfig {
             enabled: false,
             bind_address: default_metrics_bind(),
             bearer_token: None,
+            bearer_token_file: None,
             tls: None,
         }
     }

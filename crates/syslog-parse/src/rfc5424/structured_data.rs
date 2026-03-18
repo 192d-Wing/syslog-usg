@@ -257,15 +257,17 @@ fn parse_param_value<'a>(input: &'a [u8], pos: &mut usize) -> Result<ParamValue<
                     actual: len,
                 });
             }
-            let value_bytes = input.get(start..scan).ok_or(
-                ParseError::UnexpectedEndOfInput {
+            let value_bytes = input
+                .get(start..scan)
+                .ok_or(ParseError::UnexpectedEndOfInput {
                     context: "PARAM-VALUE bytes",
-                },
-            )?;
+                })?;
             let value_str = core::str::from_utf8(value_bytes)?;
-            *pos = scan.checked_add(1).ok_or(ParseError::UnexpectedEndOfInput {
-                context: "PARAM-VALUE close quote",
-            })?;
+            *pos = scan
+                .checked_add(1)
+                .ok_or(ParseError::UnexpectedEndOfInput {
+                    context: "PARAM-VALUE close quote",
+                })?;
             return Ok(ParamValue::Borrowed(value_str));
         }
 
@@ -274,19 +276,21 @@ fn parse_param_value<'a>(input: &'a [u8], pos: &mut usize) -> Result<ParamValue<
             break;
         }
 
-        scan = scan.checked_add(1).ok_or(ParseError::UnexpectedEndOfInput {
-            context: "PARAM-VALUE byte",
-        })?;
+        scan = scan
+            .checked_add(1)
+            .ok_or(ParseError::UnexpectedEndOfInput {
+                context: "PARAM-VALUE byte",
+            })?;
     }
 
     // Slow path: escapes present. Copy bytes scanned so far, then continue
     // char-by-char.
     let mut value = String::with_capacity(32);
-    let prefix = input.get(start..scan).ok_or(
-        ParseError::UnexpectedEndOfInput {
+    let prefix = input
+        .get(start..scan)
+        .ok_or(ParseError::UnexpectedEndOfInput {
             context: "PARAM-VALUE prefix",
-        },
-    )?;
+        })?;
     // Already validated as ASCII in the fast-path scan
     for &b in prefix {
         value.push(b as char);

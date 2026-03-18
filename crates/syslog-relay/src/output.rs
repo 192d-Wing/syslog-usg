@@ -137,10 +137,13 @@ impl FileOutput {
     pub async fn flush(&self) -> Result<(), RelayError> {
         let mut guard = self.writer.lock().await;
         if let Some(ref mut writer) = *guard {
-            writer.flush().await.map_err(|e| RelayError::OutputSendFailed {
-                output: self.name.clone(),
-                reason: format!("flush {}: {e}", self.path.display()),
-            })?;
+            writer
+                .flush()
+                .await
+                .map_err(|e| RelayError::OutputSendFailed {
+                    output: self.name.clone(),
+                    reason: format!("flush {}: {e}", self.path.display()),
+                })?;
         }
         Ok(())
     }

@@ -466,6 +466,11 @@ fn validate(config: &ServerConfig) -> Result<(), ConfigError> {
         }
     }
 
+    // Metrics bearer token file validation.
+    if let Some(ref path) = config.metrics.bearer_token_file {
+        validate_path(path, "metrics.bearer_token_file")?;
+    }
+
     // Metrics TLS validation.
     if let Some(ref tls) = config.metrics.tls {
         validate_path(&tls.cert_path, "metrics.tls.cert_path")?;

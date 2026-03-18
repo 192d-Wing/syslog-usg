@@ -95,9 +95,13 @@ pub fn build_server_config(config: &TlsConfig) -> Result<Arc<ServerConfig>, Tran
 
         let mut verifier_builder = WebPkiClientVerifier::builder(Arc::new(root_store));
         if !crls.is_empty() {
-            verifier_builder =
-                verifier_builder.with_crls(crls).allow_unknown_revocation_status();
-            info!("CRL revocation checking enabled ({} CRL file(s) loaded)", config.crl_paths.len());
+            verifier_builder = verifier_builder
+                .with_crls(crls)
+                .allow_unknown_revocation_status();
+            info!(
+                "CRL revocation checking enabled ({} CRL file(s) loaded)",
+                config.crl_paths.len()
+            );
         }
         let verifier = verifier_builder.build().map_err(|e| {
             TransportError::InvalidFrame(format!("failed to build client cert verifier: {e}"))
@@ -121,7 +125,9 @@ pub fn build_server_config(config: &TlsConfig) -> Result<Arc<ServerConfig>, Tran
     // RFC 5425 §5.3: enable session resumption with bounded cache
     server_config.session_storage = ServerSessionMemoryCache::new(1024);
 
-    info!("TLS server configuration loaded (RFC 9662 cipher suites enforced, session cache enabled)");
+    info!(
+        "TLS server configuration loaded (RFC 9662 cipher suites enforced, session cache enabled)"
+    );
 
     Ok(Arc::new(server_config))
 }

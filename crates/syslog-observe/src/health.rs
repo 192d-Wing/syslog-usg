@@ -172,11 +172,19 @@ impl AuthRateLimiter {
         if let Ok(mut map) = self.failures.lock() {
             // Cap tracked IPs to prevent OOM
             if map.len() >= AUTH_RATE_LIMIT_MAX_IPS && !map.contains_key(&ip) {
-                // Evict expired entries
-                let now_secs = AUTH_FAIL_WINDOW_SECS;
-                map.retain(|_, (_, first_time)| first_time.elapsed().as_secs() < now_secs);
+                // Evict expired entries first.
+                let window = AUTH_FAIL_WINDOW_SECS;
+                map.retain(|_, (_, first_time)| first_time.elapsed().as_secs() < window);
+                // If still full after evicting expired entries, evict the oldest
+                // entries to make room — prevents an attacker from locking out
+                // new IP tracking by flooding from many IPs.
                 if map.len() >= AUTH_RATE_LIMIT_MAX_IPS {
-                    return; // Still full — ignore
+                    // Find and remove the entry with the oldest first_time.
+                    if let Some(oldest_ip) =
+                        map.iter().min_by_key(|(_, (_, t))| *t).map(|(ip, _)| *ip)
+                    {
+                        map.remove(&oldest_ip);
+                    }
                 }
             }
             let entry = map.entry(ip).or_insert((0, Instant::now()));

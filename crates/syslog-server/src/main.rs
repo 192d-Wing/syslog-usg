@@ -198,18 +198,37 @@ async fn main() {
         }
     };
 
+    // Resolve bearer token: file takes precedence over inline value.
+    let bearer_token = match config.metrics.bearer_token_file {
+        Some(ref path) => match std::fs::read_to_string(path) {
+            Ok(contents) => {
+                let trimmed = contents.trim().to_owned();
+                if trimmed.is_empty() {
+                    error!(path = %path, "bearer_token_file is empty");
+                    std::process::exit(1);
+                }
+                Some(trimmed)
+            }
+            Err(e) => {
+                error!(path = %path, "failed to read bearer_token_file: {e}");
+                std::process::exit(1);
+            }
+        },
+        None => config.metrics.bearer_token.clone(),
+    };
+
     // Refuse to bind metrics/management endpoints on non-loopback without auth
-    if config.metrics.bearer_token.is_none() && !health_addr.ip().is_loopback() {
+    if bearer_token.is_none() && !health_addr.ip().is_loopback() {
         error!(
             addr = %health_addr,
             "metrics/management endpoints MUST be authenticated on a non-loopback address — \
-             set metrics.bearer_token in config, or bind to a loopback address"
+             set metrics.bearer_token or metrics.bearer_token_file in config, \
+             or bind to a loopback address"
         );
         std::process::exit(1);
     }
 
     let health_state_clone = health_state.clone();
-    let bearer_token = config.metrics.bearer_token.clone();
     let metrics_tls_config = config.metrics.tls.clone();
     let health_handle = tokio::spawn(async move {
         let app = health_router_with_token(health_state_clone, bearer_token);

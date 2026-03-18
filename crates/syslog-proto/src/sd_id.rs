@@ -72,7 +72,10 @@ impl SdId {
             // name must be non-empty, PEN must be non-empty digits per RFC 5612
             let name_part = s.get(..at_pos).unwrap_or("");
             let pen_part = s.get(at_pos + 1..).unwrap_or("");
-            if name_part.is_empty() || pen_part.is_empty() || !pen_part.bytes().all(|b| b.is_ascii_digit()) {
+            if name_part.is_empty()
+                || pen_part.is_empty()
+                || !pen_part.bytes().all(|b| b.is_ascii_digit())
+            {
                 return Err(InvalidSdId::InvalidEnterprisePen(s.to_owned()));
             }
             Ok(Self::Enterprise(CompactString::new(s)))

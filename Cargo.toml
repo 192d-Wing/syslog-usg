@@ -115,3 +115,10 @@ unwrap_used = "deny"
 expect_used = "deny"
 indexing_slicing = "deny"
 panic = "deny"
+
+# Release build hardening: catch integer overflows, enable LTO for smaller
+# and faster binaries, and use a single codegen unit for better optimization.
+[profile.release]
+overflow-checks = true
+lto = true
+codegen-units = 1

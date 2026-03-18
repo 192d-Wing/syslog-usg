@@ -22,6 +22,15 @@ use crate::framing::{LfDelimitedCodec, OctetCountingCodec, SyslogCodec};
 /// Prevents unbounded HashMap growth from connections with diverse source IPs.
 const MAX_TRACKED_IPS: usize = 100_000;
 
+/// Default timeout for TLS handshake completion.
+/// Prevents Slowloris-style attacks where an attacker holds connection slots
+/// by sending partial ClientHello messages.
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Default read timeout applied when no explicit timeout is configured.
+/// Prevents half-open connections from holding resources indefinitely.
+const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// A framed syslog message received over TCP/TLS.
 #[derive(Debug, Clone)]
 pub struct TcpMessage {
@@ -87,12 +96,21 @@ struct PerIpGuard {
 
 impl Drop for PerIpGuard {
     fn drop(&mut self) {
-        if let Ok(mut map) = self.counts.lock() {
-            if let Some(count) = map.get_mut(&self.ip) {
-                *count = count.saturating_sub(1);
-                if *count == 0 {
-                    map.remove(&self.ip);
-                }
+        // Recover from mutex poison to prevent permanently blocking the IP.
+        // A poisoned mutex indicates a panic in another thread; the inner
+        // data may be inconsistent, but decrementing is always safe since
+        // we use saturating_sub and remove-on-zero semantics.
+        let mut map = match self.counts.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!(ip = %self.ip, "per-IP tracking mutex poisoned, recovering");
+                poisoned.into_inner()
+            }
+        };
+        if let Some(count) = map.get_mut(&self.ip) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                map.remove(&self.ip);
             }
         }
     }
@@ -119,8 +137,14 @@ pub async fn run_tcp_listener(
     let per_ip_counts: Arc<std::sync::Mutex<HashMap<IpAddr, usize>>> =
         Arc::new(std::sync::Mutex::new(HashMap::new()));
 
-    // Effective read timeout: explicit read_timeout takes precedence, then idle_timeout.
-    let effective_timeout = config.read_timeout.or(config.idle_timeout);
+    // Effective read timeout: explicit read_timeout takes precedence, then idle_timeout,
+    // then a safe default to prevent half-open connections from holding resources indefinitely.
+    let effective_timeout = Some(
+        config
+            .read_timeout
+            .or(config.idle_timeout)
+            .unwrap_or(DEFAULT_READ_TIMEOUT),
+    );
 
     info!(
         addr = %config.bind_addr,
@@ -203,6 +227,15 @@ pub async fn run_tcp_listener(
                         if let Err(e) = stream.set_nodelay(true) {
                             debug!(peer = %peer, "failed to set TCP_NODELAY: {e}");
                         }
+                        // Enable TCP keepalive to detect and clean up
+                        // half-open connections at the OS level.
+                        let sock_ref = socket2::SockRef::from(&stream);
+                        let keepalive = socket2::TcpKeepalive::new()
+                            .with_time(Duration::from_secs(60))
+                            .with_interval(Duration::from_secs(15));
+                        if let Err(e) = sock_ref.set_tcp_keepalive(&keepalive) {
+                            debug!(peer = %peer, "failed to set TCP keepalive: {e}");
+                        }
 
                         let tx = tx.clone();
                         let tls_acceptor = tls_acceptor.clone();
@@ -214,12 +247,23 @@ pub async fn run_tcp_listener(
                             let _permit = permit;
                             let _per_ip_guard = per_ip_guard;
                             if let Some(acceptor) = tls_acceptor {
-                                match acceptor.accept(stream).await {
-                                    Ok(tls_stream) => {
+                                // Timeout the TLS handshake to prevent Slowloris-style
+                                // attacks that hold connection slots by sending partial
+                                // ClientHello messages.
+                                match tokio::time::timeout(
+                                    TLS_HANDSHAKE_TIMEOUT,
+                                    acceptor.accept(stream),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(tls_stream)) => {
                                         handle_tls_connection(tls_stream, peer, max_frame_size, tx, effective_timeout, use_lf).await;
                                     }
-                                    Err(e) => {
+                                    Ok(Err(e)) => {
                                         warn!(peer = %peer, "TLS handshake failed: {e}");
+                                    }
+                                    Err(_) => {
+                                        warn!(peer = %peer, "TLS handshake timed out after {}s", TLS_HANDSHAKE_TIMEOUT.as_secs());
                                     }
                                 }
                             } else {
