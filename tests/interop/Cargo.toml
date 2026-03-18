@@ -1,0 +1,35 @@
+[package]
+name = "syslog-interop-tests"
+description = "Interoperability tests with real syslog senders (rsyslog, syslog-ng)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+expect_used = "allow"
+unwrap_used = "allow"
+indexing_slicing = "allow"
+panic = "allow"
+
+[[test]]
+name = "interop"
+path = "interop_tests.rs"
+
+[dependencies]
+syslog-proto = { workspace = true }
+syslog-parse = { workspace = true }
+syslog-transport = { workspace = true }
+syslog-relay = { workspace = true }
+syslog-config = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tokio-stream = { workspace = true }
+bytes = { workspace = true }
+compact_str = { workspace = true }
+time = { workspace = true }
+tempfile = "3"

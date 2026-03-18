@@ -1656,6 +1656,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "syslog-interop-tests"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "compact_str",
+ "syslog-config",
+ "syslog-parse",
+ "syslog-proto",
+ "syslog-relay",
+ "syslog-transport",
+ "tempfile",
+ "time",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+]
+
+[[package]]
 name = "syslog-mgmt"
 version = "0.1.0"
 dependencies = [

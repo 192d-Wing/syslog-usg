@@ -11,6 +11,7 @@ members = [
     "crates/syslog-sign",
     "crates/syslog-mgmt",
     "tests/integration",
+    "tests/interop",
     "benches/syslog-bench",
 ]
 
