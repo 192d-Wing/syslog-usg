@@ -24,12 +24,17 @@ path = "end_to_end.rs"
 name = "hardening"
 path = "hardening.rs"
 
+[[test]]
+name = "lifecycle"
+path = "lifecycle.rs"
+
 [dependencies]
 syslog-proto = { workspace = true }
 syslog-parse = { workspace = true }
 syslog-transport = { workspace = true }
 syslog-relay = { workspace = true }
 syslog-sign = { workspace = true }
+syslog-config = { workspace = true }
 tokio = { workspace = true }
 bytes = { workspace = true }
 compact_str = { workspace = true }

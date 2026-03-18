@@ -250,6 +250,140 @@ impl<O: Output> Pipeline<O> {
         }
     }
 
+    /// Process a single ingress message through verification, filtering,
+    /// signing, and routing. Returns `true` if the message was forwarded
+    /// to at least one output, `false` otherwise (filtered/rejected/dropped).
+    ///
+    /// Mutates the provided counters in place.
+    fn process_one(
+        &mut self,
+        message: SyslogMessage,
+        processed: &mut u64,
+        filtered: &mut u64,
+        rejected: &mut u64,
+    ) {
+        // Step 1: Verification (if configured)
+        if let Some(ref verification) = self.verification {
+            let vresult = verification.check_incoming(&message);
+            if !verification.should_forward(vresult) {
+                *rejected += 1;
+                if let Some(ref state) = self.shared_state {
+                    state.counters().increment_dropped();
+                }
+                metrics::counter!("relay_messages_rejected_total").increment(1);
+                debug!(result = ?vresult, "message rejected by verification");
+                return;
+            }
+        }
+
+        // Step 2: Apply filter chain — short-circuit on first rejection
+        for filter in &self.filters {
+            if !filter.should_pass(&message) {
+                *filtered += 1;
+                if let Some(ref state) = self.shared_state {
+                    state.counters().increment_dropped();
+                }
+                metrics::counter!("relay_messages_filtered_total", "filter" => filter.name().to_owned())
+                    .increment(1);
+                debug!(
+                    filter = filter.name(),
+                    severity = %message.severity,
+                    "message filtered out"
+                );
+                return;
+            }
+        }
+
+        *processed += 1;
+        metrics::counter!("relay_messages_processed_total").increment(1);
+
+        // Step 3: Signing (if configured) — produces original + sig/cert messages
+        // Step 4: Route to outputs
+        //
+        // When signing is not configured (common case), we avoid allocating
+        // a Vec and directly fan out the single message.
+        if let Some(ref mut signing) = self.signing {
+            let messages_to_send = match signing.process_message(&message) {
+                Ok(msgs) => msgs,
+                Err(e) => {
+                    metrics::counter!("relay_signing_failures_total").increment(1);
+                    if self.signing_fail_open {
+                        warn!(error = %e, "signing failed, forwarding unsigned (fail-open)");
+                        vec![message]
+                    } else {
+                        warn!(error = %e, "signing failed, dropping message (fail-closed)");
+                        if let Some(ref state) = self.shared_state {
+                            state.counters().increment_dropped();
+                        }
+                        *filtered += 1;
+                        return;
+                    }
+                }
+            };
+
+            if let Some(ref routing_table) = self.routing_table {
+                let indices =
+                    routing_table.matching_output_indices(match messages_to_send.first() {
+                        Some(m) => m,
+                        None => return,
+                    });
+                if indices.is_empty() {
+                    if let Some(ref state) = self.shared_state {
+                        state.counters().increment_dropped();
+                    }
+                } else {
+                    if let Some(ref state) = self.shared_state {
+                        state.counters().increment_forwarded();
+                    }
+                    self.send_to_routed_outputs(messages_to_send, &indices);
+                }
+            } else {
+                if let Some(ref state) = self.shared_state {
+                    state.counters().increment_forwarded();
+                }
+                self.send_to_all_outputs(messages_to_send);
+            }
+        } else {
+            // No signing — avoid Vec allocation, fan out single message directly
+            if let Some(ref routing_table) = self.routing_table {
+                let indices = routing_table.matching_output_indices(&message);
+                if indices.is_empty() {
+                    if let Some(ref state) = self.shared_state {
+                        state.counters().increment_dropped();
+                    }
+                } else {
+                    if let Some(ref state) = self.shared_state {
+                        state.counters().increment_forwarded();
+                    }
+                    self.fanout_single_to_routed(message, &indices);
+                }
+            } else {
+                if let Some(ref state) = self.shared_state {
+                    state.counters().increment_forwarded();
+                }
+                self.fanout_single_to_all(message);
+            }
+        }
+    }
+
+    /// Drain remaining buffered messages from the ingress channel.
+    ///
+    /// Called during shutdown to process messages that were already in the
+    /// channel when the shutdown signal arrived, preventing silent message loss.
+    fn drain_ingress(&mut self, processed: &mut u64, filtered: &mut u64, rejected: &mut u64) {
+        let mut drained: u64 = 0;
+        while let Ok(message) = self.rx.try_recv() {
+            self.process_one(message, processed, filtered, rejected);
+            drained += 1;
+        }
+        if drained > 0 {
+            info!(
+                count = drained,
+                "drained buffered ingress messages during shutdown"
+            );
+        }
+    }
+
     /// Flush signing stage and send flush messages to all output channels.
     fn flush_signing_to_all(&mut self) {
         if let Some(ref mut signing) = self.signing {
@@ -330,6 +464,15 @@ impl<O: Output> Pipeline<O> {
                     // shut down the pipeline. This prevents a busy-loop when
                     // the ShutdownHandle is dropped without sending `true`.
                     if result.is_err() || *self.shutdown.borrow() {
+                        // Drain any messages already buffered in the ingress
+                        // channel before stopping — prevents silent message loss
+                        // when shutdown arrives while messages are in flight.
+                        self.drain_ingress(
+                            &mut messages_processed,
+                            &mut messages_filtered,
+                            &mut messages_rejected,
+                        );
+
                         self.flush_signing_to_all();
 
                         let replay_state = self.replay_state();
@@ -351,116 +494,12 @@ impl<O: Output> Pipeline<O> {
                 msg = self.rx.recv() => {
                     match msg {
                         Some(message) => {
-                            // Step 1: Verification (if configured)
-                            if let Some(ref verification) = self.verification {
-                                let vresult = verification.check_incoming(&message);
-                                if !verification.should_forward(vresult) {
-                                    messages_rejected += 1;
-                                    if let Some(ref state) = self.shared_state {
-                                        state.counters().increment_dropped();
-                                    }
-                                    metrics::counter!("relay_messages_rejected_total").increment(1);
-                                    debug!(
-                                        result = ?vresult,
-                                        "message rejected by verification"
-                                    );
-                                    continue;
-                                }
-                            }
-
-                            // Step 2: Apply filter chain — short-circuit on first rejection
-                            let mut filtered = false;
-                            for filter in &self.filters {
-                                if !filter.should_pass(&message) {
-                                    messages_filtered += 1;
-                                    if let Some(ref state) = self.shared_state {
-                                        state.counters().increment_dropped();
-                                    }
-                                    metrics::counter!("relay_messages_filtered_total", "filter" => filter.name().to_owned()).increment(1);
-                                    debug!(
-                                        filter = filter.name(),
-                                        severity = %message.severity,
-                                        "message filtered out"
-                                    );
-                                    filtered = true;
-                                    break;
-                                }
-                            }
-                            if filtered {
-                                continue;
-                            }
-
-                            messages_processed += 1;
-                            metrics::counter!("relay_messages_processed_total").increment(1);
-
-                            // Step 3: Signing (if configured) — produces original + sig/cert messages
-                            // Step 4: Route to outputs
-                            //
-                            // When signing is not configured (common case), we avoid allocating
-                            // a Vec and directly fan out the single message.
-                            if let Some(ref mut signing) = self.signing {
-                                let messages_to_send = match signing.process_message(&message) {
-                                    Ok(msgs) => msgs,
-                                    Err(e) => {
-                                        metrics::counter!("relay_signing_failures_total").increment(1);
-                                        if self.signing_fail_open {
-                                            warn!(error = %e, "signing failed, forwarding unsigned (fail-open)");
-                                            vec![message]
-                                        } else {
-                                            warn!(error = %e, "signing failed, dropping message (fail-closed)");
-                                            if let Some(ref state) = self.shared_state {
-                                                state.counters().increment_dropped();
-                                            }
-                                            messages_filtered += 1;
-                                            continue;
-                                        }
-                                    }
-                                };
-
-                                if let Some(ref routing_table) = self.routing_table {
-                                    let indices = routing_table.matching_output_indices(
-                                        match messages_to_send.first() {
-                                            Some(m) => m,
-                                            None => continue,
-                                        },
-                                    );
-                                    if indices.is_empty() {
-                                        if let Some(ref state) = self.shared_state {
-                                            state.counters().increment_dropped();
-                                        }
-                                    } else {
-                                        if let Some(ref state) = self.shared_state {
-                                            state.counters().increment_forwarded();
-                                        }
-                                        self.send_to_routed_outputs(messages_to_send, &indices);
-                                    }
-                                } else {
-                                    if let Some(ref state) = self.shared_state {
-                                        state.counters().increment_forwarded();
-                                    }
-                                    self.send_to_all_outputs(messages_to_send);
-                                }
-                            } else {
-                                // No signing — avoid Vec allocation, fan out single message directly
-                                if let Some(ref routing_table) = self.routing_table {
-                                    let indices = routing_table.matching_output_indices(&message);
-                                    if indices.is_empty() {
-                                        if let Some(ref state) = self.shared_state {
-                                            state.counters().increment_dropped();
-                                        }
-                                    } else {
-                                        if let Some(ref state) = self.shared_state {
-                                            state.counters().increment_forwarded();
-                                        }
-                                        self.fanout_single_to_routed(message, &indices);
-                                    }
-                                } else {
-                                    if let Some(ref state) = self.shared_state {
-                                        state.counters().increment_forwarded();
-                                    }
-                                    self.fanout_single_to_all(message);
-                                }
-                            }
+                            self.process_one(
+                                message,
+                                &mut messages_processed,
+                                &mut messages_filtered,
+                                &mut messages_rejected,
+                            );
                         }
                         None => {
                             // Ingress channel closed — flush signing and stop.

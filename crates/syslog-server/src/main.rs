@@ -161,7 +161,7 @@ async fn main() {
         .and_then(|v| v.state_path.clone());
 
     // Start the relay pipeline — return replay-detector state on shutdown.
-    let pipeline_handle = tokio::spawn(async move {
+    let mut pipeline_handle = tokio::spawn(async move {
         match pipeline.run().await {
             Ok(()) => None,
             Err(RelayError::Shutdown { replay_state }) => {
@@ -308,31 +308,49 @@ async fn main() {
 
     // Initiate graceful shutdown
     info!("initiating graceful shutdown");
+    let shutdown_start = std::time::Instant::now();
     health_state.set_ready(false);
     let _ = shutdown_tx.send(true);
     pipeline_shutdown.shutdown();
 
-    // Wait for drain timeout
+    // Wait for pipeline to finish draining within the configured timeout.
+    // The pipeline drains its ingress channel and flushes signing state
+    // before returning. If the timeout expires, abort the pipeline task
+    // rather than detaching it (a dropped JoinHandle detaches the task,
+    // leaving it running orphaned).
     let drain_timeout = std::time::Duration::from_secs(config.server.drain_timeout_seconds);
-    let pipeline_result = tokio::time::timeout(drain_timeout, async {
-        let replay_state: Option<String> = pipeline_handle.await.unwrap_or_default();
-        for handle in listener_handles {
-            let _ = handle.await;
+    let deadline = tokio::time::Instant::now() + drain_timeout;
+
+    let replay_state = tokio::select! {
+        result = &mut pipeline_handle => {
+            result.unwrap_or_default()
         }
-        replay_state
-    })
-    .await;
+        _ = tokio::time::sleep_until(deadline) => {
+            warn!(
+                timeout_seconds = config.server.drain_timeout_seconds,
+                "drain timeout expired — aborting pipeline"
+            );
+            metrics::counter!("syslog_drain_timeout_total").increment(1);
+            pipeline_handle.abort();
+            let _ = pipeline_handle.await;
+            None
+        }
+    };
+
+    // Abort remaining listener tasks. After the pipeline has stopped (or
+    // been aborted), there is no consumer for listener output, so waiting
+    // further would just block. Aborting is safe because listeners do not
+    // hold durable state.
+    for handle in &listener_handles {
+        handle.abort();
+    }
+    for handle in listener_handles {
+        let _ = handle.await;
+    }
 
     // Persist replay-detector state to disk if configured.
     if let Some(ref path) = replay_state_path {
-        let state = match pipeline_result {
-            Ok(s) => s,
-            Err(_) => {
-                warn!("drain timeout expired before pipeline returned replay state");
-                None
-            }
-        };
-        if let Some(data) = state {
+        if let Some(data) = replay_state {
             match write_restricted_file(std::path::Path::new(path), data.as_bytes()) {
                 Ok(()) => info!(path = %path, "persisted replay detector state"),
                 Err(e) => {
@@ -345,7 +363,11 @@ async fn main() {
     // Health server doesn't need graceful shutdown
     health_handle.abort();
 
-    info!("syslog-usg stopped");
+    let elapsed = shutdown_start.elapsed();
+    info!(
+        duration_ms = elapsed.as_millis() as u64,
+        "syslog-usg stopped"
+    );
 }
 
 /// Detect which features are enabled based on configuration.
@@ -1270,6 +1292,10 @@ async fn wait_for_signals(
         }
     };
 
+    // Track the effective config across reloads so successive SIGHUPs
+    // correctly diff against what is actually running, not the initial config.
+    let mut effective_config = current_config.clone();
+
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
@@ -1278,7 +1304,9 @@ async fn wait_for_signals(
             }
             _ = sighup.recv() => {
                 info!("received SIGHUP — reloading configuration");
-                reload_config(config_path, log_reload, current_config);
+                if let Some(updated) = reload_config(config_path, log_reload, &effective_config) {
+                    effective_config = updated;
+                }
             }
         }
     }
@@ -1304,16 +1332,23 @@ async fn wait_for_signals(
 ///
 /// All other configuration changes are detected and logged with a warning
 /// indicating that a restart is required.
+///
+/// Returns `Some(new_config)` on successful reload so the caller can track
+/// the effective configuration for subsequent diffs. Returns `None` if the
+/// config file could not be loaded (the old config remains in effect).
 fn reload_config(
     config_path: &std::path::Path,
     log_reload: &LogReloadHandle,
     current_config: &ServerConfig,
-) {
+) -> Option<ServerConfig> {
+    metrics::counter!("syslog_reload_total").increment(1);
+
     let new_config = match syslog_config::load_config(config_path) {
         Ok(c) => c,
         Err(e) => {
             error!(path = %config_path.display(), "config reload failed: {e}");
-            return;
+            metrics::counter!("syslog_reload_errors_total", "reason" => "load_failed").increment(1);
+            return None;
         }
     };
 
@@ -1321,7 +1356,11 @@ fn reload_config(
     if new_config.logging.level != current_config.logging.level {
         match log_reload.reload_level(&new_config.logging.level) {
             Ok(()) => info!(level = %new_config.logging.level, "log level reloaded"),
-            Err(e) => error!("failed to reload log level: {e}"),
+            Err(e) => {
+                error!("failed to reload log level: {e}");
+                metrics::counter!("syslog_reload_errors_total", "reason" => "log_level_failed")
+                    .increment(1);
+            }
         }
     }
 
@@ -1361,6 +1400,7 @@ fn reload_config(
     }
 
     info!("configuration reloaded successfully");
+    Some(new_config)
 }
 
 /// Sanitize an error message for logging: truncate to 200 chars and

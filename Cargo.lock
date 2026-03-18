@@ -1644,6 +1644,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "compact_str",
+ "syslog-config",
  "syslog-parse",
  "syslog-proto",
  "syslog-relay",
