@@ -26,4 +26,4 @@ webpki-roots = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
-rcgen = "0.13"
+rcgen = "0.14"
